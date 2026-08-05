@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2-omp.2
+
+- Regenerate the Bun lockfile against the public npm registry so contributors
+  and GitHub Actions do not depend on ByteDance's internal package mirror.
+
 ## 0.3.2-omp.1
 
 - Adapt upstream `pi-schedule` 0.3.2 to Oh My Pi 17.2.9 lifecycle events.

@@ -17,7 +17,7 @@ Give the agent a way to schedule work like:
 Install the tagged release:
 
 ```bash
-omp plugin install github:hanhan3344/omp-schedule#v0.3.2-omp.1
+omp plugin install github:hanhan3344/omp-schedule#v0.3.2-omp.2
 ```
 
 For a cryptographically fixed source snapshot, replace the tag with the full

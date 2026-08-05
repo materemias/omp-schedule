@@ -1,6 +1,6 @@
 {
   "name": "omp-schedule",
-  "version": "0.3.2-omp.1",
+  "version": "0.3.2-omp.2",
   "description": "Scheduled actions for Oh My Pi agents — prompts, shell checks, notifications, one-shots, and bounded polls",
   "keywords": [
     "pi-package",
