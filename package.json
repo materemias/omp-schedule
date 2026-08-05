@@ -1,0 +1,72 @@
+{
+  "name": "omp-schedule",
+  "version": "0.3.2-omp.1",
+  "description": "Scheduled actions for Oh My Pi agents — prompts, shell checks, notifications, one-shots, and bounded polls",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "schedule",
+    "cron",
+    "recurring",
+    "polling",
+    "monitor",
+    "tasks"
+  ],
+  "type": "module",
+  "files": [
+    "src",
+    "skills",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "NOTICE.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit && vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "omp": {
+    "extensions": [
+      "./src/extension.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "author": "alessandro@pungitore.ch",
+  "contributors": [
+    {
+      "name": "Zihao Han",
+      "url": "https://github.com/hanhan3344"
+    }
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hanhan3344/omp-schedule.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hanhan3344/omp-schedule/issues"
+  },
+  "homepage": "https://github.com/hanhan3344/omp-schedule#readme",
+  "ompSchedule": {
+    "upstream": "https://github.com/pungggi/pi-schedule",
+    "upstreamVersion": "0.3.2",
+    "upstreamCommit": "1af98f0113636a4b2d7351c10af2d4e39091fcc1"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@oh-my-pi/omptype": "17.2.9",
+    "@oh-my-pi/pi-coding-agent": "17.2.9",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.1.0",
+    "@vitest/coverage-v8": "^3.1.0"
+  }
+}
