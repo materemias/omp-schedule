@@ -67,7 +67,6 @@ export interface RunnerOptions {
 export class ScheduleRunner {
   private timer: ReturnType<typeof setInterval> | null = null;
   private switchTimer: ReturnType<typeof setTimeout> | null = null;
-  private cwd = process.cwd();
   private waveActive = false;
   /** Serializes waves so run_now waits instead of silently no-oping. */
   private waveChain: Promise<unknown> = Promise.resolve();
@@ -97,7 +96,6 @@ export class ScheduleRunner {
     this.privilege.attach(pi);
 
     pi.on("session_start", async (_event, ctx) => {
-      this.cwd = ctx.cwd;
       this.stopTicker();
       this.stopSwitchTimer();
 
@@ -111,20 +109,11 @@ export class ScheduleRunner {
     });
 
     pi.on("session_switch", (_event, ctx) => {
-      this.cwd = ctx.cwd;
-      this.stopTicker();
-      this.stopSwitchTimer();
-      this.startTicker(ctx);
+      this.restartAfterSessionBoundary(ctx);
+    });
 
-      // OMP emits session_switch after the session file changes, but resume
-      // replaces the agent transcript immediately after hook completion.
-      // Deferring one event-loop turn prevents a scheduled prompt from being
-      // inserted and then overwritten by that transcript replacement.
-      this.switchTimer = setTimeout(() => {
-        this.switchTimer = null;
-        void this.fireDue(ctx, { source: "session_start" });
-      }, 0);
-      this.switchTimer.unref?.();
+    pi.on("session_branch", (_event, ctx) => {
+      this.restartAfterSessionBoundary(ctx);
     });
 
     pi.on("session_shutdown", () => {
@@ -132,6 +121,21 @@ export class ScheduleRunner {
       this.stopSwitchTimer();
       this.privilege.clear();
     });
+  }
+
+  private restartAfterSessionBoundary(ctx: ExtensionContext): void {
+    this.stopTicker();
+    this.stopSwitchTimer();
+    this.startTicker(ctx);
+
+    // OMP updates the session manager before emitting the boundary hook, but
+    // transcript replacement finishes after the hook returns. Defer delivery
+    // so a prompt cannot be overwritten by that replacement.
+    this.switchTimer = setTimeout(() => {
+      this.switchTimer = null;
+      void this.fireDue(ctx, { source: "session_start" });
+    }, 0);
+    this.switchTimer.unref?.();
   }
 
   /**
@@ -165,17 +169,19 @@ export class ScheduleRunner {
 
     try {
       const now = this.now();
+      const sessionId = ctx.sessionManager.getSessionId();
+      const cwd = ctx.sessionManager.getCwd();
       let candidates: ScheduledJob[];
 
       if (meta.jobIds && meta.jobIds.length > 0) {
         candidates = meta.jobIds
-          .map((id) => this.opts.store.get(id, this.cwd))
+          .map((id) => this.opts.store.get(id, cwd, sessionId))
           .filter((j): j is ScheduledJob => Boolean(j));
       } else {
         if (meta.source === "tick" && !ctx.isIdle()) {
           return [];
         }
-        candidates = this.opts.store.dueJobs(this.cwd, now);
+        candidates = this.opts.store.dueJobs(cwd, now, sessionId);
       }
 
       if (candidates.length === 0) return [];
@@ -191,12 +197,15 @@ export class ScheduleRunner {
       let attempts = 0; // ok + error count toward cap
 
       for (const job of candidates) {
+        if (!this.isCurrentSession(ctx, sessionId)) break;
         const forced = meta.source === "run_now";
         const result = await this.processOne(ctx, job, {
           source: meta.source,
           forced,
           deliverAs: attempts === 0 ? undefined : "followUp",
           allowFire: forced || attempts < maxFires,
+          sessionId,
+          cwd,
         });
         if (result) {
           updated.push(result);
@@ -249,6 +258,10 @@ export class ScheduleRunner {
     this.ledger.append(buildRun(args));
   }
 
+  private isCurrentSession(ctx: ExtensionContext, sessionId: string): boolean {
+    return ctx.sessionManager.getSessionId() === sessionId;
+  }
+
   private sendAgentMessage(
     body: string,
     ctx: ExtensionContext,
@@ -271,6 +284,8 @@ export class ScheduleRunner {
       source: FireSource;
       forced: boolean;
       deliverAs?: "followUp" | "steer";
+      sessionId: string;
+      cwd: string;
     },
   ): Promise<{ detail?: string; wokeAgent: boolean; lastShell?: ShellRunResult }> {
     const action: JobAction = job.action ?? DEFAULT_JOB_ACTION;
@@ -328,6 +343,8 @@ export class ScheduleRunner {
       source: FireSource;
       forced: boolean;
       deliverAs?: "followUp" | "steer";
+      sessionId: string;
+      cwd: string;
     },
   ): Promise<{ detail?: string; wokeAgent: boolean; lastShell?: ShellRunResult }> {
     const command = job.command?.trim();
@@ -335,7 +352,7 @@ export class ScheduleRunner {
       throw new Error(`shell job "${job.name}" has no command`);
     }
 
-    const cwd = job.projectPath ?? ctx.cwd ?? this.cwd;
+    const cwd = job.projectPath ?? opts.cwd;
     const timeoutMs = job.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS;
 
     if (ctx.hasUI) {
@@ -360,6 +377,14 @@ export class ScheduleRunner {
       stdout: truncateOutput(execResult.stdout),
       stderr: truncateOutput(execResult.stderr),
     };
+
+    if (!this.isCurrentSession(ctx, opts.sessionId)) {
+      return {
+        detail: `shell exit=${lastShell.code} session-switched`,
+        wokeAgent: false,
+        lastShell,
+      };
+    }
 
     this.opts.pi.sendMessage?.(
       {
@@ -400,6 +425,8 @@ export class ScheduleRunner {
       forced: boolean;
       deliverAs?: "followUp" | "steer";
       allowFire: boolean;
+      sessionId: string;
+      cwd: string;
     },
   ): Promise<ScheduledJob | null> {
     const at = this.now();
@@ -424,6 +451,7 @@ export class ScheduleRunner {
         jobId: job.id,
         jobName: job.name,
         scope: job.scope,
+        sessionId: job.sessionId,
         projectPath: job.projectPath,
         idempotencyKey: key,
         source: opts.source,
@@ -450,6 +478,7 @@ export class ScheduleRunner {
           jobId: job.id,
           jobName: job.name,
           scope: job.scope,
+          sessionId: job.sessionId,
           projectPath: job.projectPath,
           idempotencyKey: key,
           source: opts.source,
@@ -477,8 +506,16 @@ export class ScheduleRunner {
     }
 
     try {
-      // Re-check after lock (check-then-act fix).
-      const fresh = this.opts.store.get(job.id, this.cwd) ?? job;
+      if (!this.isCurrentSession(ctx, opts.sessionId)) return null;
+
+      // Re-check after lock. A removed job or session switch must not fall
+      // back to the stale candidate selected before lock acquisition.
+      const fresh = this.opts.store.get(
+        job.id,
+        opts.cwd,
+        opts.sessionId,
+      );
+      if (!fresh || !this.isCurrentSession(ctx, opts.sessionId)) return null;
       const freshKey = opts.forced ? key : idempotencyKeyFor(fresh);
       const freshAction: JobAction = fresh.action ?? DEFAULT_JOB_ACTION;
       if (!opts.forced && this.alreadyDelivered(fresh, freshKey)) {
@@ -491,6 +528,7 @@ export class ScheduleRunner {
           jobId: fresh.id,
           jobName: fresh.name,
           scope: fresh.scope,
+          sessionId: fresh.sessionId,
           projectPath: fresh.projectPath,
           idempotencyKey: freshKey,
           source: opts.source,
@@ -510,10 +548,16 @@ export class ScheduleRunner {
         source: opts.source,
         forced: opts.forced,
         deliverAs: opts.deliverAs,
+        sessionId: opts.sessionId,
+        cwd: opts.cwd,
       });
 
-      // Structural tier enforcement only when an agent turn was started.
-      if (delivery.wokeAgent) {
+      // Structural tier enforcement only when the agent turn still belongs
+      // to the session that received the scheduled prompt.
+      if (
+        delivery.wokeAgent &&
+        this.isCurrentSession(ctx, opts.sessionId)
+      ) {
         this.privilege.enter(fresh.tier ?? tier);
       }
 
@@ -532,6 +576,7 @@ export class ScheduleRunner {
         jobId: fresh.id,
         jobName: fresh.name,
         scope: fresh.scope,
+        sessionId: fresh.sessionId,
         projectPath: fresh.projectPath,
         idempotencyKey: opts.forced ? key : freshKey,
         source: opts.source,
@@ -547,13 +592,15 @@ export class ScheduleRunner {
       return finalJob;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          `[omp-schedule] failed to fire "${job.name}": ${message}`,
-          "error",
-        );
-      } else {
-        console.error(`[omp-schedule] failed to fire "${job.name}": ${message}`);
+      if (this.isCurrentSession(ctx, opts.sessionId)) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `[omp-schedule] failed to fire "${job.name}": ${message}`,
+            "error",
+          );
+        } else {
+          console.error(`[omp-schedule] failed to fire "${job.name}": ${message}`);
+        }
       }
       // Advance on error so we don't hot-loop a broken delivery path.
       const updated = this.opts.store.markAttempt(job, at, "error", {
@@ -569,6 +616,7 @@ export class ScheduleRunner {
         jobId: job.id,
         jobName: job.name,
         scope: job.scope,
+        sessionId: job.sessionId,
         projectPath: job.projectPath,
         idempotencyKey: key,
         source: opts.source,

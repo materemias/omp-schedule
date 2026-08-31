@@ -7,7 +7,7 @@ import {
   mkdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseSchedule } from "../src/schedule.js";
 import { ScheduleStore, StoreError, defaultPaths } from "../src/store.js";
@@ -87,6 +87,53 @@ describe("corrupt store quarantine", () => {
     );
     const store = new ScheduleStore(paths);
     expect(() => store.listForCwd(root)).toThrow(/missing jobs array/);
+  });
+
+  it("quarantines invalid JSON in a session sidecar", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sched-corrupt-"));
+    temps.push(root);
+    const store = new ScheduleStore(defaultPaths(join(root, "home")));
+    const sidecar = store.sessionPath("session-a");
+    mkdirSync(dirname(sidecar), { recursive: true });
+    writeFileSync(sidecar, "{not json", "utf8");
+
+    expect(() => store.listForCwd(root, "session-a")).toThrow(/invalid JSON/);
+    expect(existsSync(sidecar)).toBe(false);
+    expect(
+      readdirSync(dirname(sidecar)).some((name) =>
+        name.startsWith(`${basename(sidecar)}.corrupt-`),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["wrong scope", { scope: "global" }],
+    ["wrong owner", { sessionId: "session-b" }],
+  ])("quarantines a session sidecar with %s", (_case, mismatch) => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sched-corrupt-"));
+    temps.push(root);
+    const store = new ScheduleStore(defaultPaths(join(root, "home")));
+    const job = store.create({
+      name: "private",
+      prompt: "p",
+      schedule: parseSchedule("every 1h"),
+      scope: "session",
+      sessionId: "session-a",
+    });
+    const sidecar = store.sessionPath("session-a");
+    writeFileSync(
+      sidecar,
+      JSON.stringify({ version: 1, jobs: [{ ...job, ...mismatch }] }),
+      "utf8",
+    );
+
+    expect(() => store.listForCwd(root, "session-a")).toThrow(StoreError);
+    expect(existsSync(sidecar)).toBe(false);
+    expect(
+      readdirSync(dirname(sidecar)).some((name) =>
+        name.startsWith(`${basename(sidecar)}.corrupt-`),
+      ),
+    ).toBe(true);
   });
 
   it("takes over a leftover store lock after retries (crashed prior session)", () => {

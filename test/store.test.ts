@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -174,6 +174,39 @@ describe("ScheduleStore", () => {
 
     const listed = store.listForCwd(project);
     expect(listed.map((j) => j.id)).toEqual([a.id]);
+  });
+
+  it("isolates session CRUD by owner and stores each owner in its own sidecar", () => {
+    const { store, project } = tempStore();
+    const owner = "session-a";
+    const other = "session-b";
+    const dueAt = new Date("2025-01-01T00:00:00.000Z");
+    const job = store.create({
+      name: "private",
+      prompt: "Only session A",
+      schedule: parseSchedule("every 1h"),
+      scope: "session",
+      sessionId: owner,
+      now: dueAt,
+    });
+    store.upsert({ ...job, nextRunAt: dueAt.toISOString() });
+
+    expect(job.sessionId).toBe(owner);
+    expect(store.sessionPath(owner)).not.toBe(store.sessionPath(other));
+    expect(existsSync(store.sessionPath(owner))).toBe(true);
+    expect(store.listForCwd(project, owner).map((j) => j.id)).toEqual([job.id]);
+    expect(store.listForCwd(project, other)).toEqual([]);
+    expect(store.get(job.id, project, other)).toBeUndefined();
+    expect(store.dueJobs(project, dueAt, other)).toEqual([]);
+    expect(store.dueJobs(project, dueAt, owner).map((j) => j.id)).toEqual([
+      job.id,
+    ]);
+
+    expect(store.setEnabled(job.id, project, false, other)).toBeUndefined();
+    expect(store.setEnabled(job.id, project, false, owner)?.enabled).toBe(false);
+    expect(store.remove(job.id, project, other)).toBeUndefined();
+    expect(store.remove(job.id, project, owner)?.id).toBe(job.id);
+    expect(store.get(job.id, project, owner)).toBeUndefined();
   });
 
   it("merges global + project for cwd", () => {

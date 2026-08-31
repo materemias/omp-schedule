@@ -97,7 +97,7 @@ function buildScheduleParams(Type: TypeBuilder) {
   dailyAt: Type.Optional(
     Type.String({ description: 'Daily local time "HH:MM" (create)' }),
   ),
-  scope: Type.Optional(Type.Enum(["global", "project"] as const)),
+  scope: Type.Optional(Type.Enum(["global", "project", "session"] as const)),
   /** Overdue policy: catch_up_one (default) | skip */
   missedWindow: Type.Optional(
     Type.Enum(["catch_up_one", "skip"] as const),
@@ -228,30 +228,46 @@ export function registerScheduleTool(
       "Actions: create, list, cancel, enable, disable, run_now, history. " +
       "Create kind: prompt (default) | shell | notify | message. " +
       'Schedules: every "30m"/"2h"/"1d" or dailyAt "09:00". ' +
-      "Defaults: tier=read_only (shell→mutate), missedWindow=catch_up_one. " +
+      "Scopes: global, project, or session. " +
+      "Defaults: scope=project when .omp exists, otherwise global; " +
+      "tier=read_only (shell→mutate), missedWindow=catch_up_one. " +
       "Due jobs fire on OMP session start/switch (unless OMP was launched with an initial prompt) " +
-      "and while the session is open. See package docs/RELIABILITY.md.",
+      "and while the session is open. Session-scoped jobs never fire in another session. " +
+      "See package docs/RELIABILITY.md.",
     parameters: ScheduleParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const cwd = ctx.cwd;
+      const cwd = ctx.sessionManager.getCwd();
+      const sessionId = ctx.sessionManager.getSessionId();
 
       try {
         switch (params.action) {
           case "create":
-            return handleCreate(store, params, cwd);
+            return handleCreate(store, params, cwd, sessionId);
           case "list":
-            return handleList(store, cwd);
+            return handleList(store, cwd, sessionId);
           case "cancel":
-            return handleCancel(store, params.id, cwd);
+            return handleCancel(store, params.id, cwd, sessionId);
           case "enable":
-            return handleEnable(store, params.id, cwd, true);
+            return handleEnable(store, params.id, cwd, true, sessionId);
           case "disable":
-            return handleEnable(store, params.id, cwd, false);
+            return handleEnable(store, params.id, cwd, false, sessionId);
           case "run_now":
-            return await handleRunNow(store, runner, params.id, cwd, ctx);
+            return await handleRunNow(
+              store,
+              runner,
+              params.id,
+              cwd,
+              sessionId,
+              ctx,
+            );
           case "history":
-            return handleHistory(runLedger, params.id, params.limit);
+            return handleHistory(
+              runLedger,
+              params.id,
+              params.limit,
+              sessionId,
+            );
           default:
             return textResult(`Unknown action: ${String(params.action)}`, {
               error: "unknown_action",
@@ -292,6 +308,7 @@ function handleCreate(
     tier?: PrivilegeTier;
   },
   cwd: string,
+  sessionId: string,
 ) {
   const clean = normalizeStrictCreateParams(params);
   if (!clean.name) {
@@ -344,6 +361,7 @@ function handleCreate(
     schedule,
     scope,
     projectPath: scope === "project" ? cwd : undefined,
+    sessionId: scope === "session" ? sessionId : undefined,
     missedWindow,
     tier,
   });
@@ -355,8 +373,8 @@ function handleCreate(
 
   return textResult(
     [
-      `Created job ${job.id} "${job.name}" (${formatSchedule(job.schedule)}, ${job.scope}).`,
-      `kind=${job.action}  tier=${job.tier}  missedWindow=${job.missedWindow}${shellBits}`,
+      `Created job ${job.id} "${job.name}" (${formatSchedule(job.schedule)}).`,
+      `kind=${job.action}  scope=${job.scope}  tier=${job.tier}  missedWindow=${job.missedWindow}${shellBits}`,
       `Next run: ${formatRelative(job.nextRunAt)}.`,
       `Use schedule action=run_now id=${job.id} to fire immediately.`,
     ].join("\n"),
@@ -364,8 +382,8 @@ function handleCreate(
   );
 }
 
-function handleList(store: ScheduleStore, cwd: string) {
-  const jobs = store.listForCwd(cwd);
+function handleList(store: ScheduleStore, cwd: string, sessionId: string) {
+  const jobs = store.listForCwd(cwd, sessionId);
   if (jobs.length === 0) {
     return textResult(
       "No scheduled jobs. Create one with action=create, name, kind (optional), prompt or command, and every or dailyAt.",
@@ -376,13 +394,18 @@ function handleList(store: ScheduleStore, cwd: string) {
   return textResult(body, { jobs });
 }
 
-function handleCancel(store: ScheduleStore, id: string | undefined, cwd: string) {
+function handleCancel(
+  store: ScheduleStore,
+  id: string | undefined,
+  cwd: string,
+  sessionId: string,
+) {
   if (!id?.trim()) {
     return textResult('Error: "id" is required for cancel', {
       error: "id_required",
     });
   }
-  const removed = store.remove(id.trim(), cwd);
+  const removed = store.remove(id.trim(), cwd, sessionId);
   if (!removed) {
     return textResult(`Job ${id} not found.`, { error: "not_found" });
   }
@@ -396,6 +419,7 @@ function handleEnable(
   id: string | undefined,
   cwd: string,
   enabled: boolean,
+  sessionId: string,
 ) {
   if (!id?.trim()) {
     return textResult(
@@ -403,7 +427,7 @@ function handleEnable(
       { error: "id_required" },
     );
   }
-  const job = store.setEnabled(id.trim(), cwd, enabled);
+  const job = store.setEnabled(id.trim(), cwd, enabled, sessionId);
   if (!job) {
     return textResult(`Job ${id} not found.`, { error: "not_found" });
   }
@@ -418,6 +442,7 @@ async function handleRunNow(
   runner: ScheduleRunner,
   id: string | undefined,
   cwd: string,
+  sessionId: string,
   ctx: ExtensionContext,
 ) {
   if (!id?.trim()) {
@@ -425,7 +450,7 @@ async function handleRunNow(
       error: "id_required",
     });
   }
-  const job = store.get(id.trim(), cwd);
+  const job = store.get(id.trim(), cwd, sessionId);
   if (!job) {
     return textResult(`Job ${id} not found.`, { error: "not_found" });
   }
@@ -440,7 +465,7 @@ async function handleRunNow(
     source: "run_now",
     jobIds: [job.id],
   });
-  const updated = results[0] ?? store.get(job.id, cwd);
+  const updated = results[0] ?? store.get(job.id, cwd, sessionId);
 
   // Report actual outcome — never invent "Fired" (fail-plausible in our own tool).
   if (!results.length || !updated) {
@@ -491,10 +516,12 @@ function handleHistory(
   ledger: RunLedger,
   id: string | undefined,
   limit: number | undefined,
+  sessionId: string,
 ) {
   const rows = ledger.history({
     jobId: id?.trim() || undefined,
     limit: limit && limit > 0 ? Math.min(limit, 50) : 10,
+    sessionId,
   });
   if (rows.length === 0) {
     return textResult("No run history yet.", { runs: [] });

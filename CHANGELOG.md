@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Add explicit `session` scope alongside `global` and `project`. Session jobs
+  use per-session files and only the matching OMP session ID can list, manage,
+  inspect history, force, or automatically fire them. Create responses now
+  report the selected scope.
+- Keep session jobs dormant while their owner is closed. Resuming the same
+  session applies the existing `missedWindow` policy. Session files remain after
+  crashes or deleted sessions because the scheduler has no heartbeat or
+  automatic garbage collection.
+
 ## 0.3.2-omp.2
 
 - Regenerate the Bun lockfile against the public npm registry so contributors

@@ -43,6 +43,49 @@ describe("RunLedger", () => {
     expect(hist[0]?.status).toBe("delivered");
   });
 
+  it("hides session-scoped runs from other sessions", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-sched-ledger-"));
+    temps.push(dir);
+    const ledger = new RunLedger(join(dir, "runs.jsonl"));
+    const shared = {
+      jobName: "n",
+      idempotencyKey: "slot",
+      source: "session_start" as const,
+      status: "delivered" as const,
+      startedAt: "2025-01-01T00:00:00.000Z",
+      endedAt: "2025-01-01T00:00:01.000Z",
+      tier: "read_only" as const,
+      missedWindow: "catch_up_one" as const,
+    };
+    ledger.append(
+      buildRun({ ...shared, jobId: "global", scope: "global" }),
+    );
+    ledger.append(
+      buildRun({
+        ...shared,
+        jobId: "private-a",
+        scope: "session",
+        sessionId: "session-a",
+      }),
+    );
+    ledger.append(
+      buildRun({
+        ...shared,
+        jobId: "private-b",
+        scope: "session",
+        sessionId: "session-b",
+      }),
+    );
+
+    expect(ledger.history({}).map((run) => run.jobId)).toEqual(["global"]);
+    expect(
+      ledger.history({ sessionId: "session-a" }).map((run) => run.jobId),
+    ).toEqual(["private-a", "global"]);
+    expect(
+      ledger.history({ jobId: "private-b", sessionId: "session-a" }),
+    ).toEqual([]);
+  });
+
   it("does not treat skipped as delivered", () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-sched-ledger-"));
     temps.push(dir);

@@ -1,6 +1,6 @@
 ---
 name: schedule
-description: 'Schedule recurring agent tasks and actions — POLLS (CI / build / deploy / test / PR status), periodic checks, security reviews, version checks, reminders, scans. Owns the `schedule` tool (create / list / cancel / run_now / history) AND the design choices: kind (prompt/shell/notify/message), every-vs-dailyAt, tier (read_only/suggest/mutate), wakeOn for shell, missed-window policy, project-vs-global scope, and how to write a self-contained prompt that survives as an isolated run. Use when the user wants to POLL, WATCH, or CHECK something repeatedly — "poll the CI/build/deploy/tests", "check every N minutes", "check periodically", "watch for", "watch the", "keep an eye on", "monitor", "ping me when", "alert me if", "tell me if X", "see if it is done yet", "wait until" — or says "every day", "hourly", "daily at", "schedule", "recurring", "periodic", "remind me", "cron", or wants automated / repeating agent work.'
+description: 'Schedule recurring agent tasks and actions. Covers polls for CI, builds, deploys, tests, and PR status, plus periodic checks, security reviews, version checks, reminders, and scans. Owns the `schedule` tool (create / list / cancel / run_now / history) and its design choices: kind (prompt/shell/notify/message), every vs dailyAt, tier (read_only/suggest/mutate), wakeOn for shell, missed-window policy, global/project/session scope, and self-contained prompts for isolated runs. Use when the user wants to poll, watch, or check something repeatedly, says "check every N minutes", "keep an eye on", "monitor", "ping me when", "alert me if", "tell me if X", "wait until", "every day", "hourly", "daily at", "schedule", "recurring", "periodic", "remind me", or "cron".'
 ---
 
 # Schedule — recurring agent tasks
@@ -45,9 +45,11 @@ Two consequences shape every decision below:
    tier by what the task *actually needs to run*, not by vibe. Quiet shell /
    notify / message fires never enter the privilege stack.
 
-Firing triggers: on **OMP session start/switch** when due (initial startup is
-skipped if OMP was launched with a prompt, e.g. `omp "fix the bug"`), and every **30s** while a
-session stays open and the agent is idle. There is **no background OS daemon**.
+Eligible jobs fire on **OMP session start or switch** when due. Initial startup
+skips the check if OMP was launched with a prompt, such as `omp "fix the bug"`.
+The 30-second ticker also fires due jobs while an OMP session stays open and the
+agent is idle. Session-scoped jobs are eligible only for their exact OMP session
+ID. There is **no background OS daemon**.
 
 ## The tool at a glance
 
@@ -65,7 +67,7 @@ schedule
   maxRuns       (create) cap deliveries (ok+error) before auto-disable
   every         (create) "30m" | "2h" | "1d"   (xor with dailyAt/once)
   dailyAt       (create) "09:00" local time   (xor with every/once)
-  scope         global | project              (default: project if .omp/ exists in cwd)
+  scope         global | project | session    (default: project if .omp/ exists in cwd, otherwise global)
   tier          read_only | suggest | mutate  (default read_only; shell forces mutate)
   missedWindow  catch_up_one | skip           (default catch_up_one)
   id            (cancel/enable/disable/run_now/history)
@@ -75,6 +77,8 @@ schedule
 **Interval rules:** min `1m`, max `90d`; `once` allows seconds (`30s`) up to `90d`.
 **Always `list` before `create`** to avoid duplicate jobs (no auto-dedup).
 **Terminated jobs** (once fired / maxRuns reached) are disabled and skipped by due scans; re-enable clears the flag, or cancel + recreate.
+**Create reports scope.** Every create response states the selected scope,
+including when the tool chose the default.
 
 ## Decisions
 
@@ -117,11 +121,25 @@ local timezone and DST-safe.
 
 ### `scope`
 
-- **project** (default when `.omp/` exists in cwd): tied to this repo. Use for
-  anything repo-specific (security review, deps, tests). Launch OMP from the
-  project root so the cwd is right.
-- **global**: lives in `~/.omp/schedule`, independent of any project. Use for
-  cross-project / personal reminders and checks.
+Choose among `global`, `project`, and `session`:
+
+- **session** is explicit only. Use it when the task must never enter another
+  conversation. Jobs live in
+  `~/.omp/schedule/sessions/<session-id-hash>.json`. Only the exact OMP session
+  ID can list, manage, inspect history, `run_now`, or automatically fire them.
+  Other sessions never fall back to this file.
+- **project** applies by default when `.omp/` exists in the current directory.
+  Use it for repo-specific work such as security reviews, dependency checks,
+  and tests. Launch OMP from the project root.
+- **global** applies by default outside a project. Jobs live in
+  `~/.omp/schedule/schedules.json`. Use it for personal reminders and checks
+  that can run in any conversation.
+
+Closing a session leaves its jobs dormant. Resuming that session applies the
+job's `missedWindow` policy. `catch_up_one` delivers one overdue slot, while
+`skip` discards stale work. New, forked, branched, and handed-off sessions have
+different IDs. Session files remain after crashes or deleted sessions. The
+scheduler has no session heartbeat or automatic garbage collection.
 
 ### `tier` — pick by what the task must *run*
 
@@ -170,6 +188,14 @@ check the thing we talked about and tell me if it's still broken
 ```
 
 ## Recipes
+
+Use session scope for a reminder that must stay in this conversation:
+
+```text
+schedule action=create name="decision-follow-up" kind="notify"
+  prompt="Revisit the pending deployment decision in this conversation."
+  once="30m" scope="session"
+```
 
 **`kind=prompt` + `read_only` — pure read/search, no shell (no `git`/`npm`/`gh`):**
 
@@ -226,9 +252,10 @@ schedule action=create name="standup-prep"
 
 ## Guardrails & verification
 
-- **Limits:** max 50 jobs per scope; max 10 creates/minute; max 5 fires at
-  session start, 3 per tick. Creating a tight loop (e.g. `every 1m`) will spam
-  the session — don't.
+- **Limits:** each global, project, or session scope file holds at most 50 jobs.
+  The process accepts at most 10 creates per minute, 5 fires at session start,
+  and 3 fires per tick. A tight loop such as `every="1m"` will spam each session
+  that can see the job.
 - **Verify a job works before trusting it:**
   - `schedule action=run_now id=<id>` — fires once immediately and reports the
     **actual** status (`ok` / `locked` / `error` / `skipped`), never fake success.

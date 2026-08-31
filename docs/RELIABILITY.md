@@ -42,9 +42,34 @@ precision/recall hard to calibrate; PM ≠ retrospective memory.
 
 **Mitigation:**
 - Skip due checks only on initial `session_start` when OMP was launched with a
-  CLI prompt (`omp "…"`). `session_switch` still processes due jobs.
+  CLI prompt (`omp "…"`). `session_switch` still processes jobs visible to the
+  switched-to session.
 - Tick fires only when `ctx.isIdle()`
 - Subsequent multi-job deliveries use `deliverAs: "followUp"`
+
+### Session-scope isolation
+
+The scheduler supports three scopes:
+
+| Scope | Store | Visibility |
+|-------|-------|------------|
+| `global` | `~/.omp/schedule/schedules.json` | Every OMP session |
+| `project` | `<project>/.omp/schedule.json` | Sessions using that project file |
+| `session` | `~/.omp/schedule/sessions/<session-id-hash>.json` | Only the OMP session with that exact ID |
+
+`session` is explicit only. The default remains `project` when `.omp` exists in
+the current directory, otherwise `global`. The create response always reports
+the selected scope.
+
+Only the matching session ID can list, manage, inspect history, `run_now`, or
+automatically fire a session job. Other sessions never fall back to that file.
+New, forked, branched, and handed-off sessions have different IDs. Closing the
+owner leaves the job dormant. If the owner resumes, normal `missedWindow` applies:
+`catch_up_one` delivers one overdue slot, while `skip` discards stale work.
+
+Session files intentionally remain after crashes or deleted sessions. The
+scheduler has no session heartbeat and does not automatically collect orphaned
+files.
 
 ### 3. Missed window / backlog storm
 
@@ -165,7 +190,7 @@ other schedules, create it as `tier=mutate`.
 ### 8. Self-spam / runaway scheduling
 
 **Mitigation:**
-- Max **50** jobs per scope file (global or one project)
+- Max **50** jobs per scope file (global, one project, or one session file)
 - Create rate limit **10/min** (in-process)
 - Min interval **1m** (parser); `once` allows seconds up to **90d**
 - **`maxRuns`** caps deliveries per job (counts ok + error); the job then auto-disables (`terminated: maxRuns`) instead of firing forever
@@ -206,6 +231,7 @@ complex modules; governance is a regression engine, not a predictor.
 ```
 ~/.omp/schedule/
   schedules.json          # global jobs
+  sessions/<session-id-hash>.json  # jobs visible only to this exact OMP session ID
   schedules.json.corrupt-*  # quarantined bad files (if any)
   runs.jsonl              # append-only run ledger
   locks/<jobId>.lock      # O_EXCL single-flight
@@ -216,7 +242,8 @@ complex modules; governance is a regression engine, not a predictor.
 ## Tool surface (reliability-related)
 
 ```
-schedule action=create … missedWindow=catch_up_one|skip tier=read_only|suggest|mutate
+schedule action=create … scope=global|project|session missedWindow=catch_up_one|skip tier=read_only|suggest|mutate
+  # create always reports the selected scope, including a defaulted scope
 schedule action=list
 schedule action=history [id=…] [limit=10]
 schedule action=run_now id=…   # reports actual status, never invents success
@@ -226,7 +253,7 @@ schedule action=run_now id=…   # reports actual status, never invents success
 
 | Deferred | Why |
 |----------|-----|
-| OS daemon / durable workflow engine | In-session first; storage is ready |
+| OS daemon / durable workflow engine | In-session first; global and project stores are ready for a daemon |
 | True tool sandbox by tier | Needs pi platform support |
 | Confirm gate on `mutate` create | UX + platform dialogs |
 | Agent outcome verification / empty-result detector | Needs post-turn hooks or structured agent reply |

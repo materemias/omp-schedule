@@ -1,15 +1,16 @@
 /**
- * Hybrid schedule store: global (~/.omp/schedule) + project (.omp/schedule.json).
+ * Hybrid schedule store: global (~/.omp/schedule), project
+ * (.omp/schedule.json), and isolated per-session files.
  *
  * File format is versioned and daemon-ready so a future headless runner can
  * share the same on-disk jobs.
  *
  * - Corrupt / unsupported-version files are quarantined (no silent wipe).
  * - Mutations take a per-file O_EXCL lock and re-read inside the lock
- *   (reduces last-write-wins races across concurrent pi sessions).
+ *   (reduces last-write-wins races across concurrent OMP sessions).
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -57,6 +58,7 @@ export interface StorePaths {
   globalDir: string;
   globalFile: string;
   projectFile: (projectRoot: string) => string;
+  sessionFile: (sessionId: string) => string;
   runsFile: string;
   lockDir: string;
 }
@@ -67,6 +69,12 @@ export function defaultPaths(home: string = homedir()): StorePaths {
     globalDir,
     globalFile: join(globalDir, GLOBAL_FILE_NAME),
     projectFile: (projectRoot: string) => join(resolve(projectRoot), PROJECT_REL),
+    sessionFile: (sessionId: string) =>
+      join(
+        globalDir,
+        "sessions",
+        `${createHash("sha256").update(sessionId).digest("hex")}.json`,
+      ),
     runsFile: join(globalDir, "runs.jsonl"),
     lockDir: join(globalDir, "locks"),
   };
@@ -74,6 +82,14 @@ export function defaultPaths(home: string = homedir()): StorePaths {
 
 export function newJobId(): string {
   return randomBytes(6).toString("hex");
+}
+
+function requireSessionId(sessionId: string | undefined): string {
+  const value = sessionId?.trim();
+  if (!value) {
+    throw new StoreError("Session-scoped jobs require an active OMP session ID.");
+  }
+  return value;
 }
 
 function emptyStore(): ScheduleStoreFile {
@@ -140,7 +156,11 @@ function quarantineAndThrow(filePath: string, reason: string): never {
   );
 }
 
-function readStoreFile(filePath: string): ScheduleStoreFile {
+function readStoreFile(
+  filePath: string,
+  expectedScope?: ScheduleScope,
+  expectedSessionId?: string,
+): ScheduleStoreFile {
   if (!existsSync(filePath)) return emptyStore();
   let raw: string;
   try {
@@ -169,10 +189,27 @@ function readStoreFile(filePath: string): ScheduleStoreFile {
     quarantineAndThrow(filePath, "missing jobs array");
   }
 
-  return {
-    version: STORE_VERSION,
-    jobs: (parsed.jobs as ScheduledJob[]).map(normalizeJob),
-  };
+  const jobs = (parsed.jobs as ScheduledJob[]).map(normalizeJob);
+  if (expectedScope) {
+    for (const job of jobs) {
+      if (job.scope !== expectedScope) {
+        quarantineAndThrow(
+          filePath,
+          `contains ${String(job.scope)} job ${job.id} in ${expectedScope} store`,
+        );
+      }
+      if (
+        expectedScope === "session" &&
+        job.sessionId !== expectedSessionId
+      ) {
+        quarantineAndThrow(
+          filePath,
+          `session job ${job.id} belongs to a different session`,
+        );
+      }
+    }
+  }
+  return { version: STORE_VERSION, jobs };
 }
 
 function writeStoreFile(filePath: string, store: ScheduleStoreFile): void {
@@ -267,26 +304,56 @@ export class ScheduleStore {
     return this.paths.projectFile(projectRoot);
   }
 
-  listForCwd(cwd: string): ScheduledJob[] {
+  sessionPath(sessionId: string): string {
+    return this.paths.sessionFile(requireSessionId(sessionId));
+  }
+
+  listForCwd(cwd: string, sessionId?: string): ScheduledJob[] {
     const projectRoot = resolve(cwd);
-    const global = readStoreFile(this.paths.globalFile).jobs;
-    const project = readStoreFile(this.paths.projectFile(projectRoot)).jobs;
+    const global = readStoreFile(this.paths.globalFile, "global").jobs;
+    const project = readStoreFile(
+      this.paths.projectFile(projectRoot),
+      "project",
+    ).jobs;
     const projectFiltered = project.filter(
       (j) => !j.projectPath || resolve(j.projectPath) === projectRoot,
     );
-    return [...global, ...projectFiltered].map(normalizeJob);
+    const session = sessionId
+      ? readStoreFile(
+          this.paths.sessionFile(sessionId),
+          "session",
+          sessionId,
+        ).jobs
+      : [];
+    return [...global, ...projectFiltered, ...session];
   }
 
-  get(id: string, cwd: string): ScheduledJob | undefined {
-    return this.listForCwd(cwd).find((j) => j.id === id);
+  get(id: string, cwd: string, sessionId?: string): ScheduledJob | undefined {
+    return this.listForCwd(cwd, sessionId).find((j) => j.id === id);
   }
 
-  countInScope(scope: ScheduleScope, projectRoot?: string): number {
-    if (scope === "global") {
-      return readStoreFile(this.paths.globalFile).jobs.length;
+  countInScope(
+    scope: ScheduleScope,
+    projectRoot?: string,
+    sessionId?: string,
+  ): number {
+    switch (scope) {
+      case "global":
+        return readStoreFile(this.paths.globalFile, "global").jobs.length;
+      case "project": {
+        const root = resolve(projectRoot ?? process.cwd());
+        return readStoreFile(this.paths.projectFile(root), "project").jobs
+          .length;
+      }
+      case "session": {
+        const owner = requireSessionId(sessionId);
+        return readStoreFile(
+          this.paths.sessionFile(owner),
+          "session",
+          owner,
+        ).jobs.length;
+      }
     }
-    const root = resolve(projectRoot ?? process.cwd());
-    return readStoreFile(this.paths.projectFile(root)).jobs.length;
   }
 
   create(input: CreateJobInput): ScheduledJob {
@@ -295,8 +362,13 @@ export class ScheduleStore {
       scope === "project"
         ? resolve(input.projectPath ?? process.cwd())
         : undefined;
+    const sessionId =
+      scope === "session" ? requireSessionId(input.sessionId) : undefined;
 
-    if (this.countInScope(scope, projectRoot) >= LIMITS.maxJobsPerScope) {
+    if (
+      this.countInScope(scope, projectRoot, sessionId) >=
+      LIMITS.maxJobsPerScope
+    ) {
       throw new StoreError(
         `Job limit reached (${LIMITS.maxJobsPerScope} per ${scope} scope). Cancel unused jobs first.`,
       );
@@ -323,6 +395,7 @@ export class ScheduleStore {
       schedule: input.schedule,
       scope,
       projectPath: projectRoot,
+      sessionId,
       enabled: true,
       terminated: null,
       missedWindow: input.missedWindow ?? DEFAULT_MISSED_WINDOW,
@@ -347,7 +420,7 @@ export class ScheduleStore {
   upsert(job: ScheduledJob): void {
     const file = this.fileFor(job);
     withFileLock(file, () => {
-      const store = readStoreFile(file);
+      const store = readStoreFile(file, job.scope, job.sessionId);
       const normalized = normalizeJob(job);
       const idx = store.jobs.findIndex((j) => j.id === normalized.id);
       if (idx >= 0) store.jobs[idx] = normalized;
@@ -356,13 +429,34 @@ export class ScheduleStore {
     });
   }
 
-  remove(id: string, cwd: string): ScheduledJob | undefined {
+  remove(
+    id: string,
+    cwd: string,
+    sessionId?: string,
+  ): ScheduledJob | undefined {
     const projectRoot = resolve(cwd);
 
-    const fromGlobal = this.removeFromFile(this.paths.globalFile, id);
+    const fromGlobal = this.removeFromFile(
+      this.paths.globalFile,
+      id,
+      "global",
+    );
     if (fromGlobal) return fromGlobal;
 
-    return this.removeFromFile(this.paths.projectFile(projectRoot), id);
+    const fromProject = this.removeFromFile(
+      this.paths.projectFile(projectRoot),
+      id,
+      "project",
+    );
+    if (fromProject) return fromProject;
+
+    if (!sessionId) return undefined;
+    return this.removeFromFile(
+      this.paths.sessionFile(sessionId),
+      id,
+      "session",
+      sessionId,
+    );
   }
 
   /**
@@ -411,8 +505,13 @@ export class ScheduleStore {
     return this.markAttempt(job, at, status, { error });
   }
 
-  setEnabled(id: string, cwd: string, enabled: boolean): ScheduledJob | undefined {
-    const job = this.get(id, cwd);
+  setEnabled(
+    id: string,
+    cwd: string,
+    enabled: boolean,
+    sessionId?: string,
+  ): ScheduledJob | undefined {
+    const job = this.get(id, cwd, sessionId);
     if (!job) return undefined;
     const updated: ScheduledJob = {
       ...job,
@@ -445,21 +544,37 @@ export class ScheduleStore {
     return updated;
   }
 
-  dueJobs(cwd: string, now: Date = new Date()): ScheduledJob[] {
-    return this.listForCwd(cwd).filter(
+  dueJobs(
+    cwd: string,
+    now: Date = new Date(),
+    sessionId?: string,
+  ): ScheduledJob[] {
+    return this.listForCwd(cwd, sessionId).filter(
       (j) => j.enabled && new Date(j.nextRunAt).getTime() <= now.getTime(),
     );
   }
 
   private fileFor(job: ScheduledJob): string {
-    if (job.scope === "global") return this.paths.globalFile;
-    const root = job.projectPath ?? process.cwd();
-    return this.paths.projectFile(root);
+    switch (job.scope) {
+      case "global":
+        return this.paths.globalFile;
+      case "project": {
+        const root = job.projectPath ?? process.cwd();
+        return this.paths.projectFile(root);
+      }
+      case "session":
+        return this.paths.sessionFile(requireSessionId(job.sessionId));
+    }
   }
 
-  private removeFromFile(file: string, id: string): ScheduledJob | undefined {
+  private removeFromFile(
+    file: string,
+    id: string,
+    scope: ScheduleScope,
+    sessionId?: string,
+  ): ScheduledJob | undefined {
     return withFileLock(file, () => {
-      const store = readStoreFile(file);
+      const store = readStoreFile(file, scope, sessionId);
       const idx = store.jobs.findIndex((j) => j.id === id);
       if (idx < 0) return undefined;
       const [removed] = store.jobs.splice(idx, 1);

@@ -47,20 +47,23 @@ omp plugin link ./omp-schedule
 |-------|----------|
 | **Tool** | `schedule` — create / list / cancel / enable / disable / run_now / history |
 | **Kinds** | `prompt` (default) · `shell` · `notify` · `message` — what fires when due |
-| **Storage** | Hybrid: global `~/.omp/schedule/schedules.json` + project `.omp/schedule.json` |
+| **Storage** | Scoped: global `~/.omp/schedule/schedules.json`, project `.omp/schedule.json`, or session `~/.omp/schedule/sessions/<session-id-hash>.json` |
 | **Syntax** | Intervals (`30m`, `2h`, `1d`) and daily wall-clock (`09:00`) |
 | **Fire** | On OMP session start/switch when due; also while the session stays open (30s ticker) |
 | **Skip** | If OMP was launched with an initial prompt (`omp "do X"`), due jobs are not checked on initial startup; later session switches still check |
 | **Reliability** | Run ledger, single-flight locks, missed-window policy, privilege tiers, fire caps — see [docs/RELIABILITY.md](docs/RELIABILITY.md) |
 
-Storage is **daemon-ready**: each job tracks `nextRunAt` / `lastRunAt` so a future headless runner can share the same files.
+Global and project stores are **daemon-ready**. Each job tracks `nextRunAt` and
+`lastRunAt`, so a future headless runner can share those files. Session jobs
+require the matching OMP session ID.
 
 ## Agent skill
 
 The package ships a **`schedule` skill** (`skills/schedule/SKILL.md`) that
 loads on-demand and teaches the agent *how to schedule well*: when to use
 `kind` (prompt / shell / notify / message), `every` vs `dailyAt`, privilege
-tier, shell `wakeOn`, the missed-window tradeoff, and self-contained prompts.
+tier, shell `wakeOn`, global/project/session scope, the missed-window tradeoff,
+and self-contained prompts.
 The tool is self-describing for mechanics; the skill owns the patterns.
 
 ## Agent tool
@@ -80,12 +83,24 @@ schedule
   maxRuns?:       max deliveries (ok+error) before auto-disable
   every?:         "30m" | "2h" | "1d"   (xor dailyAt/once)
   dailyAt?:       "09:00"               (xor every/once)
-  scope?:         "global" | "project"  (default: project if .omp exists)
+  scope?:         "global" | "project" | "session"  (default: project if .omp exists, otherwise global)
   missedWindow?:  "catch_up_one" | "skip"   (default catch_up_one)
   tier?:          "read_only" | "suggest" | "mutate"  (default read_only; shell→mutate)
   id?:            job id
   limit?:         history row count
 ```
+
+`scope="session"` is explicit only. A create response always states the selected
+scope, including when the tool chose the default.
+
+Session jobs live in a separate file for the creating OMP session ID. Only that
+same session can list, manage, inspect history, `run_now`, or automatically fire
+them. Other sessions never fall back to the session file. Closing the owner
+leaves its jobs dormant. Resuming it applies the existing `missedWindow` policy:
+`catch_up_one` delivers one overdue slot, while `skip` discards stale work. New,
+forked, branched, and handed-off sessions have different IDs. Session files
+remain after crashes or deleted sessions. There is no heartbeat or automatic
+garbage collection.
 
 ### Job kinds
 
@@ -150,10 +165,17 @@ schedule action=cancel id=abc123def456
 
 ## Delivery rules
 
-1. **Session start**: load hybrid store and process due jobs.
-2. **Session switch** (`new` / `resume` / `fork` / `handoff`): process due jobs after OMP commits the switch, so a resumed transcript cannot overwrite the injected task.
+1. **Session start.** Load global and current project jobs. Load session jobs
+   only from the file for the current OMP session ID, then process due jobs.
+2. **Session switch** (`new` / `resume` / `fork` / `handoff`). Process due
+   global and project jobs after OMP commits the switch, so a resumed transcript
+   cannot overwrite the injected task. Process session jobs only when the
+   switched-to session ID matches their file. New, forked, branched, and
+   handed-off sessions cannot see jobs owned by another session.
 3. **CLI initial prompt**: only on process startup, if launched with a user message (`omp "check this"`), skip the immediate due check. Later session switches still process due jobs.
-4. **Missed window**: `catch_up_one` fires once when overdue; `skip` only fires within grace (`max(2×tick, 25% period)`), otherwise advances without firing.
+4. **Missed window.** `catch_up_one` fires once when overdue, including after a
+   session-scoped job's owner resumes. `skip` only fires within grace
+   (`max(2×tick, 25% period)`), otherwise it advances without firing.
 5. **In-session ticker**: every 30s, if the agent is idle, process newly due jobs (capped).
 6. **`run_now`**: attempts force delivery; tool reports **actual** status (`ok` / `locked` / `error`), never invents success.
 7. **Locks + ledger**: O_EXCL file lock + idempotency key; forensic trail in `~/.omp/schedule/runs.jsonl`.
@@ -179,6 +201,7 @@ jobId: …
 ```
 ~/.omp/schedule/
   schedules.json
+  sessions/<session-id-hash>.json
   runs.jsonl
   locks/
 
@@ -196,7 +219,7 @@ Summary of MVP mitigations:
 - Single-flight locks + idempotency keys
 - Append-only run ledger (`history`)
 - Privilege tiers in the fire prompt
-- Create rate limit + max jobs per scope
+- Create rate limit + max 50 jobs in each global, project, or session scope file
 
 ## MVP scope
 
@@ -204,7 +227,7 @@ Summary of MVP mitigations:
 - action kinds: prompt / shell / notify / message (shell via `bash -lc`, optional `wakeOn`)
 - lifecycle: `once` one-shots + `maxRuns` bounded polling
 - no cron expressions yet
-- no background OS daemon (in-session only; storage is ready)
+- no background OS daemon (in-session only; global and project stores are ready for one)
 - `delivered` = action executed (prompt injected / shell finished / notify shown), not “agent finished correctly”
 
 ## Dev

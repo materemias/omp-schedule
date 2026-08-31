@@ -28,6 +28,7 @@ const temps: string[] = [];
 
 afterEach(() => {
   for (const t of temps.splice(0)) rmSync(t, { recursive: true, force: true });
+  vi.useRealTimers();
 });
 
 interface HarnessOpts {
@@ -37,6 +38,12 @@ interface HarnessOpts {
   hasUI?: boolean;
   execResult?: { stdout?: string; stderr?: string; code?: number; killed?: boolean };
   execThrows?: boolean;
+  execDeferred?: Promise<{
+    stdout?: string;
+    stderr?: string;
+    code?: number;
+    killed?: boolean;
+  }>;
 }
 
 function makeHarness(opts: HarnessOpts = {}) {
@@ -52,6 +59,7 @@ function makeHarness(opts: HarnessOpts = {}) {
   const privilege = new PrivilegeGuard();
 
   let clock = new Date(T0);
+  let sessionId = "session-a";
   let idle = opts.idle ?? true;
   const sent: { content: string; deliverAs?: string }[] = [];
   const customMessages: Array<{ content: string; triggerTurn?: boolean }> = [];
@@ -93,7 +101,9 @@ function makeHarness(opts: HarnessOpts = {}) {
         timeout: o?.timeout,
       });
       if (opts.execThrows) throw new Error("exec boom");
-      const r = opts.execResult ?? {};
+      const r = opts.execDeferred
+        ? await opts.execDeferred
+        : (opts.execResult ?? {});
       return {
         stdout: r.stdout ?? "ok\n",
         stderr: r.stderr ?? "",
@@ -105,6 +115,10 @@ function makeHarness(opts: HarnessOpts = {}) {
 
   const ctx = {
     cwd: project,
+    sessionManager: {
+      getCwd: () => project,
+      getSessionId: () => sessionId,
+    },
     hasUI: opts.hasUI ?? true,
     isIdle: () => idle,
     ui: { notify: (m: string) => notifies.push(m) },
@@ -156,8 +170,11 @@ function makeHarness(opts: HarnessOpts = {}) {
     setIdle: (b: boolean) => {
       idle = b;
     },
-    forceDue: (id: string, when = T0) => {
-      const j = store.get(id, project);
+    setSessionId: (id: string) => {
+      sessionId = id;
+    },
+    forceDue: (id: string, when = T0, owner = sessionId) => {
+      const j = store.get(id, project, owner);
       if (j) store.upsert({ ...j, nextRunAt: when });
     },
     emit: async (event: string, e?: unknown) => {
@@ -221,6 +238,30 @@ describe("ScheduleRunner — delivery", () => {
     await h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [job.id] });
 
     expect(h.sent).toHaveLength(2);
+  });
+
+  it("uses session identity, not cwd, to select session-scoped jobs", async () => {
+    const h = makeHarness();
+    const job = h.store.create({
+      name: "private",
+      prompt: "session A only",
+      schedule: parseSchedule("every 1h"),
+      scope: "session",
+      sessionId: "session-a",
+    });
+    h.forceDue(job.id, T0, "session-a");
+
+    h.setSessionId("session-b");
+    await expect(
+      h.runner.fireDue(h.ctx, { source: "session_start" }),
+    ).resolves.toEqual([]);
+    expect(h.sent).toHaveLength(0);
+    expect(h.store.get(job.id, h.project, "session-b")).toBeUndefined();
+
+    h.setSessionId("session-a");
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.content).toContain("session A only");
   });
 });
 
@@ -382,6 +423,68 @@ describe("ScheduleRunner — attach (session lifecycle)", () => {
     expect(h.sent).toHaveLength(1);
     await h.emit("session_shutdown");
   });
+
+  it("fires session jobs only when their owner resumes after new and branch boundaries", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ hasInitialPrompt: true });
+    h.setClock(new Date("2025-01-01T02:00:00.000Z"));
+    const catchUp = h.store.create({
+      name: "owner-catch-up",
+      prompt: "deliver to owner",
+      schedule: parseSchedule("every 1h"),
+      scope: "session",
+      sessionId: "session-a",
+      missedWindow: "catch_up_one",
+    });
+    const skip = h.store.create({
+      name: "owner-skip",
+      prompt: "do not deliver late",
+      schedule: parseSchedule("every 1h"),
+      scope: "session",
+      sessionId: "session-a",
+      missedWindow: "skip",
+    });
+    h.forceDue(catchUp.id, T0, "session-a");
+    h.forceDue(skip.id, T0, "session-a");
+    h.runner.attach();
+
+    h.setSessionId("session-new");
+    await h.emit("session_switch", {
+      type: "session_switch",
+      reason: "new",
+      previousSessionFile: "session-a.jsonl",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sent).toHaveLength(0);
+
+    const global = h.createGlobal("branch-visible");
+    h.forceDue(global.id);
+    h.setSessionId("session-branch");
+    await h.emit("session_branch", {
+      type: "session_branch",
+      previousSessionFile: "session-new.jsonl",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.content).toContain("branch-visible");
+    expect(h.store.get(catchUp.id, h.project, "session-a")?.lastStatus).toBeNull();
+
+    h.setSessionId("session-a");
+    await h.emit("session_switch", {
+      type: "session_switch",
+      reason: "resume",
+      previousSessionFile: "session-branch.jsonl",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1]?.content).toContain("deliver to owner");
+    expect(h.store.get(catchUp.id, h.project, "session-a")?.lastStatus).toBe("ok");
+    expect(h.store.get(skip.id, h.project, "session-a")?.lastStatus).toBe(
+      "skipped",
+    );
+    await h.emit("session_shutdown");
+    vi.useRealTimers();
+  });
 });
 
 describe("ScheduleRunner — construction & wave edges", () => {
@@ -529,6 +632,45 @@ describe("ScheduleRunner — action kinds", () => {
     expect(h.sent[0]?.content).toContain("Inspect the pipeline failure");
     expect(h.sent[0]?.content).toContain("exitCode: 2");
     expect(h.privilege.depth()).toBe(1);
+  });
+
+  it("shell: does not publish output or wake a session switched during exec", async () => {
+    type ExecResult = {
+      stdout: string;
+      stderr: string;
+      code: number;
+      killed: boolean;
+    };
+    let resolveExec: ((result: ExecResult) => void) | undefined;
+    const execDeferred = new Promise<ExecResult>((resolve) => {
+      resolveExec = resolve;
+    });
+    const h = makeHarness({ execDeferred });
+    const job = h.store.create({
+      name: "slow-ci",
+      prompt: "review the result",
+      action: "shell",
+      command: "slow-check",
+      wakeOn: "always",
+      tier: "mutate",
+      schedule: parseSchedule("every 1h"),
+      scope: "global",
+    });
+    h.forceDue(job.id);
+
+    const wave = h.runner.fireDue(h.ctx, { source: "session_start" });
+    expect(h.execCalls).toHaveLength(1);
+    h.setSessionId("session-b");
+    if (!resolveExec) throw new Error("exec did not start");
+    resolveExec({ stdout: "done", stderr: "", code: 0, killed: false });
+    await wave;
+
+    expect(h.sent).toHaveLength(0);
+    expect(h.customMessages).toHaveLength(0);
+    expect(h.privilege.depth()).toBe(0);
+    const updated = h.store.get(job.id, h.project, "session-b")!;
+    expect(updated.lastStatus).toBe("ok");
+    expect(updated.lastShell?.stdout).toBe("done");
   });
 
   it("shell: does not wake on success when wakeOn=failure", async () => {

@@ -7,7 +7,7 @@
  * Reliability model: see docs/RELIABILITY.md
  */
 
-export type ScheduleScope = "global" | "project";
+export type ScheduleScope = "global" | "project" | "session";
 
 /** Interval schedule: every N minutes / hours / days. */
 export interface IntervalSchedule {
@@ -128,6 +128,11 @@ export interface ScheduledJob {
    * Undefined for global jobs.
    */
   projectPath?: string;
+  /**
+   * Owning OMP session ID for session-scoped jobs.
+   * Undefined for global and project jobs.
+   */
+  sessionId?: string;
   enabled: boolean;
   /** Overdue handling. Default catch_up_one. */
   missedWindow: MissedWindowPolicy;
@@ -171,6 +176,7 @@ export interface CreateJobInput {
   schedule: ScheduleSpec;
   scope: ScheduleScope;
   projectPath?: string;
+  sessionId?: string;
   missedWindow?: MissedWindowPolicy;
   tier?: PrivilegeTier;
   maxRuns?: number;
@@ -184,6 +190,8 @@ export interface JobRun {
   jobId: string;
   jobName: string;
   scope: ScheduleScope;
+  /** Owning session for session-scoped runs. */
+  sessionId?: string;
   projectPath?: string;
   /** Stable key for this due slot; prevents double-fire. */
   idempotencyKey: string;

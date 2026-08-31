@@ -42,6 +42,7 @@ function setup() {
 
   const store = new ScheduleStore(paths);
   const ledger = new RunLedger(paths.runsFile);
+  let sessionId = "session-a";
 
   // Configurable stub runner: fireDue returns whatever run_nowResult holds.
   let runNowResult: ScheduledJob[] = [];
@@ -55,7 +56,12 @@ function setup() {
       params: Record<string, unknown>,
       signal: unknown,
       onUpdate: unknown,
-      ctx: { cwd: string },
+      ctx: {
+        sessionManager: {
+          getCwd: () => string;
+          getSessionId: () => string;
+        };
+      },
     ) => Promise<{ content: Array<{ type: string; text: string }> }>;
   } | null = null;
   const pi = {
@@ -67,8 +73,14 @@ function setup() {
 
   registerScheduleTool(pi, store, runner, ledger);
 
+  const ctx = {
+    sessionManager: {
+      getCwd: () => project,
+      getSessionId: () => sessionId,
+    },
+  };
   const exec = (params: Record<string, unknown>) =>
-    tool!.execute("t1", params, undefined, undefined, { cwd: project });
+    tool!.execute("t1", params, undefined, undefined, ctx);
 
   /** Create a job then overwrite fields (lastStatus etc.) for status tests. */
   const seed = (
@@ -93,6 +105,9 @@ function setup() {
     seed,
     setRunNowResult: (r: ScheduledJob[]) => {
       runNowResult = r;
+    },
+    setSessionId: (id: string) => {
+      sessionId = id;
     },
   };
 }
@@ -141,6 +156,7 @@ describe("schedule tool — create", () => {
       tier: "read_only",
     });
     expect(text(r as any)).toContain("Created job");
+    expect(text(r)).toContain("scope=global");
     const jobs = store.listForCwd(project);
     expect(jobs).toHaveLength(1);
     expect(jobs[0]?.name).toBe("review");
@@ -208,12 +224,51 @@ describe("schedule tool — create", () => {
     });
 
     expect(text(result as any)).toContain("Created job");
+    expect(text(result)).toContain("scope=project");
     const job = store.listForCwd(project)[0]!;
     expect(job.action).toBe("notify");
     expect(job.schedule.type).toBe("once");
     expect(job.maxRuns).toBeUndefined();
     expect(job.command).toBeUndefined();
     expect(job.wakeOn).toBeUndefined();
+  });
+
+  it("keeps session create, list, cancel, and run_now private to the owner", async () => {
+    const s = setup();
+    const created = await s.exec({
+      action: "create",
+      name: "private",
+      prompt: "owner only",
+      every: "1h",
+      scope: "session",
+    });
+    expect(text(created)).toContain("scope=session");
+    const job = s.store.listForCwd(s.project, "session-a")[0]!;
+    expect(job.sessionId).toBe("session-a");
+
+    s.setSessionId("session-b");
+    expect(text(await s.exec({ action: "list" }))).toContain(
+      "No scheduled jobs",
+    );
+    expect(
+      text(await s.exec({ action: "cancel", id: job.id })),
+    ).toContain("not found");
+    expect(
+      text(await s.exec({ action: "run_now", id: job.id })),
+    ).toContain("not found");
+    expect(s.store.get(job.id, s.project, "session-a")).toBeDefined();
+
+    s.setSessionId("session-a");
+    expect(text(await s.exec({ action: "list" }))).toContain(job.id);
+    const delivered = { ...job, lastStatus: "ok" as const };
+    s.setRunNowResult([delivered]);
+    expect(
+      text(await s.exec({ action: "run_now", id: job.id })),
+    ).toContain("Delivered");
+    expect(
+      text(await s.exec({ action: "cancel", id: job.id })),
+    ).toContain("Cancelled");
+    expect(s.store.get(job.id, s.project, "session-a")).toBeUndefined();
   });
 
   it("creates a one-shot job (once) and a maxRuns-bounded job", async () => {
@@ -342,6 +397,32 @@ describe("schedule tool — history", () => {
     const r = await s.exec({ action: "history", id: j.id });
     expect(text(r as any)).toContain("Run history");
     expect(text(r as any)).toContain("delivered");
+  });
+
+  it("shows session run history only to its owner", async () => {
+    const s = setup();
+    s.ledger.append(
+      buildRun({
+        jobId: "private",
+        jobName: "private run",
+        scope: "session",
+        sessionId: "session-a",
+        idempotencyKey: "private:slot",
+        source: "session_start",
+        status: "delivered",
+        startedAt: "2025-01-01T00:00:00.000Z",
+        endedAt: "2025-01-01T00:00:01.000Z",
+        tier: "read_only",
+        missedWindow: "catch_up_one",
+      }),
+    );
+
+    s.setSessionId("session-b");
+    expect(text(await s.exec({ action: "history" }))).not.toContain(
+      "private run",
+    );
+    s.setSessionId("session-a");
+    expect(text(await s.exec({ action: "history" }))).toContain("private run");
   });
 });
 

@@ -62,13 +62,19 @@ export class RunLedger {
     return false;
   }
 
-  /** Recent runs, newest first, optionally filtered by jobId. */
-  history(opts: { jobId?: string; limit?: number } = {}): JobRun[] {
+  /** Recent visible runs, newest first, optionally filtered by jobId. */
+  history(
+    opts: { jobId?: string; limit?: number; sessionId?: string } = {},
+  ): JobRun[] {
     const limit = opts.limit ?? 20;
-    const all = this.readRecent();
+    const visible = this.readRecent().filter(
+      (run) =>
+        run.scope !== "session" ||
+        (Boolean(opts.sessionId) && run.sessionId === opts.sessionId),
+    );
     const filtered = opts.jobId
-      ? all.filter((r) => r.jobId === opts.jobId)
-      : all;
+      ? visible.filter((run) => run.jobId === opts.jobId)
+      : visible;
     return filtered.slice(0, limit);
   }
 
@@ -99,6 +105,7 @@ export function buildRun(partial: {
   jobName: string;
   scope: JobRun["scope"];
   projectPath?: string;
+  sessionId?: string;
   idempotencyKey: string;
   source: JobRun["source"];
   status: RunStatus;
@@ -115,6 +122,7 @@ export function buildRun(partial: {
     jobName: partial.jobName,
     scope: partial.scope,
     projectPath: partial.projectPath,
+    sessionId: partial.sessionId,
     idempotencyKey: partial.idempotencyKey,
     source: partial.source,
     status: partial.status,
