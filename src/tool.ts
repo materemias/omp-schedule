@@ -20,6 +20,7 @@ import {
   DEFAULT_TIER,
   LIMITS,
 } from "./policy.js";
+import { hasShellCapability, SHELL_CAPABILITY_REQUIRED } from "./privilege.js";
 import {
   formatRelative,
   formatSchedule,
@@ -237,6 +238,15 @@ export function registerScheduleTool(
       const cwd = ctx.cwd;
 
       try {
+        if (
+          params.action !== "list" &&
+          params.action !== "history" &&
+          !hasShellCapability(pi)
+        ) {
+          return textResult(`Error: ${SHELL_CAPABILITY_REQUIRED}`, {
+            error: "shell_capability_required",
+          });
+        }
         switch (params.action) {
           case "create":
             return handleCreate(store, params, cwd);
@@ -266,7 +276,11 @@ export function registerScheduleTool(
           return textResult(`Error: ${err.message}`, { error: err.message });
         }
         const message = err instanceof Error ? err.message : String(err);
-        return textResult(`Error: ${message}`, { error: message });
+        return textResult(`Error: ${message}`, {
+          error: message === SHELL_CAPABILITY_REQUIRED
+            ? "shell_capability_required"
+            : message,
+        });
       }
     },
   });

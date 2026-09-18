@@ -34,7 +34,11 @@ import {
   decideDue,
   idempotencyKeyFor,
 } from "./policy.js";
-import { PrivilegeGuard } from "./privilege.js";
+import {
+  hasShellCapability,
+  PrivilegeGuard,
+  SHELL_CAPABILITY_REQUIRED,
+} from "./privilege.js";
 import {
   buildFirePrompt,
   buildShellFollowUpPrompt,
@@ -143,6 +147,7 @@ export class ScheduleRunner {
     ctx: ExtensionContext,
     meta: { source: FireSource; jobIds?: string[] },
   ): Promise<ScheduledJob[]> {
+    if (!this.canRun(meta.source)) return [];
     if (meta.source === "run_now") {
       const result = this.waveChain.then(() => this.runWave(ctx, meta));
       this.waveChain = result.then(
@@ -156,10 +161,18 @@ export class ScheduleRunner {
     return this.runWave(ctx, meta);
   }
 
+  private canRun(source: FireSource): boolean {
+    if (hasShellCapability(this.opts.pi)) return true;
+    if (source === "run_now") throw new Error(SHELL_CAPABILITY_REQUIRED);
+    return false;
+  }
+
   private async runWave(
     ctx: ExtensionContext,
     meta: { source: FireSource; jobIds?: string[] },
   ): Promise<ScheduledJob[]> {
+    // run_now may have waited behind another wave while capabilities changed.
+    if (!this.canRun(meta.source)) return [];
     if (this.waveActive && meta.source !== "run_now") return [];
     this.waveActive = true;
 
@@ -191,6 +204,7 @@ export class ScheduleRunner {
       let attempts = 0; // ok + error count toward cap
 
       for (const job of candidates) {
+        if (!this.canRun(meta.source)) break;
         const forced = meta.source === "run_now";
         const result = await this.processOne(ctx, job, {
           source: meta.source,
@@ -360,6 +374,14 @@ export class ScheduleRunner {
       stdout: truncateOutput(execResult.stdout),
       stderr: truncateOutput(execResult.stderr),
     };
+
+    if (!hasShellCapability(this.opts.pi)) {
+      return {
+        detail: `shell exit=${lastShell.code} delivery-suppressed`,
+        wokeAgent: false,
+        lastShell,
+      };
+    }
 
     this.opts.pi.sendMessage?.(
       {

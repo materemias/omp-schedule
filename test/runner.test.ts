@@ -27,6 +27,7 @@ const T0 = "2025-01-01T00:00:00.000Z";
 const temps: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const t of temps.splice(0)) rmSync(t, { recursive: true, force: true });
 });
 
@@ -36,6 +37,12 @@ interface HarnessOpts {
   hasInitialPrompt?: boolean;
   hasUI?: boolean;
   execResult?: { stdout?: string; stderr?: string; code?: number; killed?: boolean };
+  execDeferred?: Promise<{
+    stdout?: string;
+    stderr?: string;
+    code?: number;
+    killed?: boolean;
+  }>;
   execThrows?: boolean;
 }
 
@@ -53,6 +60,7 @@ function makeHarness(opts: HarnessOpts = {}) {
 
   let clock = new Date(T0);
   let idle = opts.idle ?? true;
+  let activeTools = ["read", "bash", "schedule"];
   const sent: { content: string; deliverAs?: string }[] = [];
   const customMessages: Array<{ content: string; triggerTurn?: boolean }> = [];
   const notifies: string[] = [];
@@ -62,6 +70,7 @@ function makeHarness(opts: HarnessOpts = {}) {
     {};
 
   const pi = {
+    getActiveTools: () => activeTools,
     on(event: string, handler: (e: unknown, ctx: unknown) => unknown): void {
       (handlers[event] ??= []).push(handler);
     },
@@ -93,7 +102,9 @@ function makeHarness(opts: HarnessOpts = {}) {
         timeout: o?.timeout,
       });
       if (opts.execThrows) throw new Error("exec boom");
-      const r = opts.execResult ?? {};
+      const r = opts.execDeferred
+        ? await opts.execDeferred
+        : (opts.execResult ?? {});
       return {
         stdout: r.stdout ?? "ok\n",
         stderr: r.stderr ?? "",
@@ -155,6 +166,9 @@ function makeHarness(opts: HarnessOpts = {}) {
     },
     setIdle: (b: boolean) => {
       idle = b;
+    },
+    setActiveTools: (tools: string[]) => {
+      activeTools = tools;
     },
     forceDue: (id: string, when = T0) => {
       const j = store.get(id, project);
@@ -225,6 +239,90 @@ describe("ScheduleRunner — delivery", () => {
 });
 
 describe("ScheduleRunner — caps & gating", () => {
+  it("does not fire or mutate due jobs through restricted lifecycle or manual entrypoints", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness();
+    const shell = h.store.create({
+      name: "restricted-shell",
+      action: "shell",
+      command: "printf forbidden",
+      wakeOn: "always",
+      tier: "mutate",
+      schedule: parseSchedule("every 1h"),
+      scope: "global",
+    });
+    const prompt = h.createGlobal("restricted-prompt");
+    h.forceDue(shell.id);
+    h.forceDue(prompt.id);
+    const before = h.store.listForCwd(h.project);
+    h.setActiveTools(["read", "schedule"]);
+    h.runner.attach();
+
+    try {
+      await h.emit("session_start", { type: "session_start" });
+      await h.emit("session_switch", { type: "session_switch", reason: "new" });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(
+        h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [shell.id] }),
+      ).rejects.toThrow("active bash tool");
+      expect(h.store.listForCwd(h.project)).toEqual(before);
+      expect(h.ledger.history({})).toEqual([]);
+      expect(h.execCalls).toEqual([]);
+      expect(h.sent).toEqual([]);
+      expect(h.customMessages).toEqual([]);
+      expect(h.notifies).toEqual([]);
+    } finally {
+      await h.emit("session_shutdown");
+    }
+
+    h.setActiveTools(["read", "bash", "schedule"]);
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+    expect(h.execCalls).toHaveLength(1);
+    expect(h.store.get(shell.id, h.project)?.runCount).toBe(1);
+    expect(h.store.get(prompt.id, h.project)?.runCount).toBe(1);
+  });
+
+  it("rechecks bash between jobs and queued waves, and suppresses restricted follow-ups", async () => {
+    let finishExec: (() => void) | undefined;
+    const execDeferred = new Promise<{ code: number }>((resolve) => {
+      finishExec = () => resolve({ code: 0 });
+    });
+    const h = makeHarness({ execDeferred });
+    const shell = h.store.create({
+      name: "in-flight",
+      action: "shell",
+      command: "slow-check",
+      wakeOn: "always",
+      tier: "mutate",
+      schedule: parseSchedule("every 1h"),
+      scope: "global",
+    });
+    const queued = h.createGlobal("queued");
+    const before = h.store.get(queued.id, h.project);
+    const first = h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [shell.id, queued.id] });
+    await Promise.resolve();
+    expect(h.execCalls).toHaveLength(1);
+    const second = h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [queued.id] });
+    const blocked = expect(second).rejects.toThrow("active bash tool");
+    const interrupted = expect(first).rejects.toThrow("active bash tool");
+    h.setActiveTools(["read", "schedule"]);
+    if (!finishExec) throw new Error("missing shell completion");
+    finishExec();
+    await interrupted;
+    await blocked;
+    expect(h.execCalls).toHaveLength(1);
+    expect(h.store.get(queued.id, h.project)).toEqual(before);
+    expect(h.ledger.history({ jobId: queued.id })).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(h.customMessages).toEqual([]);
+
+    h.setActiveTools(["read", "bash", "schedule"]);
+    await h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [queued.id] });
+    expect(h.store.get(queued.id, h.project)?.runCount).toBe(1);
+    expect(h.sent).toHaveLength(1);
+  });
+
   it("caps session_start fires at maxFiresPerSessionStart; over-cap jobs stay due", async () => {
     const h = makeHarness();
     const ids: string[] = [];

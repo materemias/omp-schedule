@@ -98,6 +98,12 @@ schedule
 
 Shell jobs always store `tier=mutate` (command runs outside the agent tool path). Prefer `wakeOn=failure` for CI polls so success is silent.
 
+The calling session must have an active `bash` tool to create, change, or run
+schedules. Without it, only `list` and `history` are allowed, and automatic due
+checks do no work. This prevents read-only scouts from using scheduled commands
+to bypass their tool restrictions. Delegate CLI investigations to a shell-capable
+worker and execute them directly, not through the scheduler.
+
 ### Lifecycle: `once` and `maxRuns`
 
 - **`once`** — fire one time after a relative delay (`once="10m"`, `once="30s"`), then auto-disable. Ideal for reminders and delayed follow-ups. `run_now` won't re-fire a terminated one-shot — recreate it.

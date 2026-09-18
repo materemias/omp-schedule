@@ -14,6 +14,15 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { PrivilegeTier } from "./types.js";
 
+export const SHELL_CAPABILITY_REQUIRED =
+  "Schedule mutations and execution require the active bash tool. " +
+  "Use a shell-capable task or ask the parent agent; never use the scheduler as a substitute shell. " +
+  "list/history remain available.";
+
+export function hasShellCapability(pi: ExtensionAPI): boolean {
+  return pi.getActiveTools().includes("bash");
+}
+
 const MUTATE_TOOLS = new Set(["edit", "write", "bash"]);
 const SUGGEST_BLOCK = new Set(["bash"]); // drafts OK; shell is the high-blast tool
 

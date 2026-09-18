@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Require the caller's active `bash` capability for schedule mutations and job
+  execution, including automatic due checks and queued runs. Read-only scouts
+  retain `list`/`history` but cannot use the scheduler as a substitute shell.
+
 ## 0.3.2-omp.2
 
 - Regenerate the Bun lockfile against the public npm registry so contributors
