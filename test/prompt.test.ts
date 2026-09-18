@@ -32,6 +32,7 @@ describe("buildFirePrompt", () => {
     expect(text).toContain("[scheduled-task]");
     expect(text).toContain("runId: run1");
     expect(text).toContain("jobId: deadbeefcafe");
+    expect(text).toContain("scope: project");
     expect(text).toContain("## Task");
     expect(text).toContain("Review recent changes");
     expect(text).toContain("PRIVILEGE: read_only");
@@ -95,6 +96,7 @@ describe("buildShellFollowUpPrompt", () => {
       instruction: "Fix the failing tests.",
     });
     expect(text).toContain("action: shell");
+    expect(text).toContain("scope: project");
     expect(text).toContain("shellStatus: failure");
     expect(text).toContain("npm test");
     expect(text).toContain("FAIL auth");

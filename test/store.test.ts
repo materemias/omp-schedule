@@ -370,11 +370,7 @@ describe("ScheduleStore — legacy & edge cases", () => {
     expect(store.countInScope("project")).toBeGreaterThanOrEqual(0);
   });
 
-  it("defaultScope: project when .omp exists, else global", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-sched-scope-"));
-    temps.push(root);
-    expect(defaultScope(root)).toBe("global");
-    mkdirSync(join(root, ".omp"), { recursive: true });
-    expect(defaultScope(root)).toBe("project");
+  it("defaultScope: session", () => {
+    expect(defaultScope()).toBe("session");
   });
 });

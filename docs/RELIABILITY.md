@@ -57,9 +57,8 @@ The scheduler supports three scopes:
 | `project` | `<project>/.omp/schedule.json` | Sessions using that project file |
 | `session` | `~/.omp/schedule/sessions/<session-id-hash>.json` | Only the OMP session with that exact ID |
 
-`session` is explicit only. The default remains `project` when `.omp` exists in
-the current directory, otherwise `global`. The create response always reports
-the selected scope.
+`session` is the default. `project` and `global` are explicit opt-ins. The
+create response always reports the selected scope.
 
 Only the matching session ID can list, manage, inspect history, `run_now`, or
 automatically fire a session job. Other sessions never fall back to that file.

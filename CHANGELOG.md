@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Require the caller's active `bash` capability for schedule mutations and job
+  execution, including automatic due checks and queued runs. Read-only scouts
+  retain `list`/`history` but cannot use the scheduler as a substitute shell.
+- Default scope for `create` is now `session` (was `project` when `.omp/`
+  exists in the cwd, otherwise `global`). Pass `scope=project` or
+  `scope=global` explicitly for jobs that must outlive this conversation.
+- Fire prompts now include a `scope:` line in the `[scheduled-task]` header so
+  the agent can see which scope a fired job belongs to.
+- Non-agent displays now carry the scope: notify toasts, message notes, and
+  shell start/exit notices render `[omp-schedule:session] …`. Message notes
+  previously had no attribution at all.
 - Add explicit `session` scope alongside `global` and `project`. Session jobs
   use per-session files and only the matching OMP session ID can list, manage,
   inspect history, force, or automatically fire them. Create responses now

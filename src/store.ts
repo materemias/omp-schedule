@@ -585,10 +585,9 @@ export class ScheduleStore {
 }
 
 /** Resolve default scope when the agent omits it. */
-export function defaultScope(cwd: string): ScheduleScope {
-  // Note: no upward walk — uses ctx.cwd only. Project jobs live at
-  // <cwd>/.omp/schedule.json. Launch OMP from the project root.
-  const ompDir = join(resolve(cwd), ".omp");
-  if (existsSync(ompDir)) return "project";
-  return "global";
+export function defaultScope(): ScheduleScope {
+  // Session is the default: scheduled work overwhelmingly belongs to the
+  // conversation that created it. Cross-session persistence (global/project)
+  // is an explicit opt-in.
+  return "session";
 }

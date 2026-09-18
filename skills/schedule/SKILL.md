@@ -67,7 +67,7 @@ schedule
   maxRuns       (create) cap deliveries (ok+error) before auto-disable
   every         (create) "30m" | "2h" | "1d"   (xor with dailyAt/once)
   dailyAt       (create) "09:00" local time   (xor with every/once)
-  scope         global | project | session    (default: project if .omp/ exists in cwd, otherwise global)
+  scope         global | project | session    (default: session)
   tier          read_only | suggest | mutate  (default read_only; shell forces mutate)
   missedWindow  catch_up_one | skip           (default catch_up_one)
   id            (cancel/enable/disable/run_now/history)
@@ -121,19 +121,19 @@ local timezone and DST-safe.
 
 ### `scope`
 
-Choose among `global`, `project`, and `session`:
+Choose among `session`, `project`, and `global`:
 
-- **session** is explicit only. Use it when the task must never enter another
+- **session** is the default. Use it when the task belongs to this
   conversation. Jobs live in
   `~/.omp/schedule/sessions/<session-id-hash>.json`. Only the exact OMP session
   ID can list, manage, inspect history, `run_now`, or automatically fire them.
   Other sessions never fall back to this file.
-- **project** applies by default when `.omp/` exists in the current directory.
-  Use it for repo-specific work such as security reviews, dependency checks,
-  and tests. Launch OMP from the project root.
-- **global** applies by default outside a project. Jobs live in
-  `~/.omp/schedule/schedules.json`. Use it for personal reminders and checks
-  that can run in any conversation.
+- **project** is an explicit opt-in for repo-specific work such as security
+  reviews, dependency checks, and tests that should outlive this conversation.
+  Jobs live in `<project>/.omp/schedule.json`. Launch OMP from the project
+  root.
+- **global** is an explicit opt-in for personal reminders and checks that can
+  run in any conversation. Jobs live in `~/.omp/schedule/schedules.json`.
 
 Closing a session leaves its jobs dormant. Resuming that session applies the
 job's `missedWindow` policy. `catch_up_one` delivers one overdue slot, while

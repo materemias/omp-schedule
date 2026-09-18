@@ -13,14 +13,14 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import * as TypeBox from "@oh-my-pi/omptype/typebox";
 import { RunLedger, buildRun } from "../src/ledger.js";
 import { ScheduleStore, defaultPaths } from "../src/store.js";
 import { parseSchedule } from "../src/schedule.js";
 import { _resetCreateLimiterForTests, registerScheduleTool } from "../src/tool.js";
-import type { ScheduleRunner } from "../src/runner.js";
+import { ScheduleRunner } from "../src/runner.js";
 import type { ScheduledJob } from "../src/types.js";
 
 const temps: string[] = [];
@@ -33,7 +33,7 @@ beforeEach(() => {
   _resetCreateLimiterForTests();
 });
 
-function setup() {
+function setup(realRunner = false) {
   const root = mkdtempSync(join(tmpdir(), "pi-sched-tool-"));
   temps.push(root);
   const home = join(root, "home");
@@ -43,6 +43,15 @@ function setup() {
   const store = new ScheduleStore(paths);
   const ledger = new RunLedger(paths.runsFile);
   let sessionId = "session-a";
+  let activeTools = ["read", "bash", "schedule"];
+  const shellExec = vi.fn(async () => ({
+    stdout: "ok",
+    stderr: "",
+    code: 0,
+    killed: false,
+  }));
+  const sendUserMessage = vi.fn();
+  const sendMessage = vi.fn();
 
   // Configurable stub runner: fireDue returns whatever run_nowResult holds.
   let runNowResult: ScheduledJob[] = [];
@@ -62,18 +71,32 @@ function setup() {
           getSessionId: () => string;
         };
       },
-    ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    ) => Promise<{
+      content: Array<{ type: string; text: string }>;
+      details?: Record<string, unknown>;
+    }>;
   } | null = null;
   const pi = {
     typebox: TypeBox,
+    getActiveTools: () => activeTools,
+    exec: shellExec,
+    sendUserMessage,
+    sendMessage,
     registerTool: (t: typeof tool) => {
       tool = t;
     },
   } as unknown as ExtensionAPI;
 
-  registerScheduleTool(pi, store, runner, ledger);
+  registerScheduleTool(
+    pi,
+    store,
+    realRunner ? new ScheduleRunner({ store, pi, ledger }) : runner,
+    ledger,
+  );
 
   const ctx = {
+    hasUI: false,
+    isIdle: () => true,
     sessionManager: {
       getCwd: () => project,
       getSessionId: () => sessionId,
@@ -103,6 +126,12 @@ function setup() {
     ledger,
     exec,
     seed,
+    shellExec,
+    sendUserMessage,
+    sendMessage,
+    setActiveTools: (tools: string[]) => {
+      activeTools = tools;
+    },
     setRunNowResult: (r: ScheduledJob[]) => {
       runNowResult = r;
     },
@@ -114,6 +143,71 @@ function setup() {
 
 type S = ReturnType<typeof setup>;
 const text = (r: { content: Array<{ text: string }> }) => r.content[0]?.text ?? "";
+
+describe("schedule tool — shell capability", () => {
+  it("blocks mutations without bash, allows reads, and preserves parent execution", async () => {
+    const h = setup(true);
+    const job = h.seed({
+      action: "shell",
+      command: "printf ok",
+      wakeOn: "always",
+      tier: "mutate",
+    });
+    const disabled = h.seed({ name: "disabled", enabled: false });
+    h.setActiveTools(["read", "schedule"]);
+    const before = h.store.listForCwd(h.project, "session-a");
+
+    const mutations = [
+      { action: "create", name: "blocked", kind: "shell", command: "printf forbidden", every: "1h" },
+      { action: "cancel", id: job.id },
+      { action: "disable", id: job.id },
+      { action: "enable", id: disabled.id },
+      { action: "run_now", id: job.id },
+    ];
+    for (const params of mutations) {
+      const result = await h.exec(params);
+      expect(result.details?.error).toBe("shell_capability_required");
+      expect(h.store.listForCwd(h.project, "session-a")).toEqual(before);
+    }
+    expect(h.ledger.history({})).toEqual([]);
+    expect(h.shellExec).not.toHaveBeenCalled();
+    expect(h.sendUserMessage).not.toHaveBeenCalled();
+    expect(h.sendMessage).not.toHaveBeenCalled();
+    expect((await h.exec({ action: "list" })).details?.jobs).toEqual(before);
+    expect((await h.exec({ action: "history" })).details?.error).toBeUndefined();
+
+    h.setActiveTools(["read", "bash", "schedule"]);
+    const created = await h.exec({
+      action: "create",
+      name: "parent",
+      kind: "shell",
+      command: "printf parent",
+      every: "1h",
+      scope: "global",
+    });
+    expect(created.details?.error).toBeUndefined();
+    expect(h.store.listForCwd(h.project, "session-a").some((j) => j.name === "parent")).toBe(true);
+    expect((await h.exec({ action: "run_now", id: job.id })).details?.status).toBe("ok");
+    expect(h.shellExec).toHaveBeenCalledOnce();
+    expect(h.store.get(job.id, h.project)?.runCount).toBe(1);
+    expect(h.sendUserMessage).toHaveBeenCalledOnce();
+  });
+
+  it("returns the capability error when bash is revoked while run_now is queued", async () => {
+    const h = setup(true);
+    const job = h.seed({ action: "shell", command: "printf ok", tier: "mutate" });
+    h.shellExec.mockImplementationOnce(async () => {
+      h.setActiveTools(["read", "schedule"]);
+      return { stdout: "ok", stderr: "", code: 0, killed: false };
+    });
+    const first = h.exec({ action: "run_now", id: job.id });
+    const queued = h.exec({ action: "run_now", id: job.id });
+    const [, result] = await Promise.all([first, queued]);
+    expect(result.details?.error).toBe("shell_capability_required");
+    expect(h.shellExec).toHaveBeenCalledOnce();
+    expect(h.store.get(job.id, h.project)?.runCount).toBe(1);
+  });
+});
 
 describe("schedule tool — create", () => {
   it("requires name and prompt (for kind=prompt)", async () => {
@@ -156,8 +250,8 @@ describe("schedule tool — create", () => {
       tier: "read_only",
     });
     expect(text(r as any)).toContain("Created job");
-    expect(text(r)).toContain("scope=global");
-    const jobs = store.listForCwd(project);
+    expect(text(r)).toContain("scope=session");
+    const jobs = store.listForCwd(project, "session-a");
     expect(jobs).toHaveLength(1);
     expect(jobs[0]?.name).toBe("review");
     expect(jobs[0]?.tier).toBe("read_only");
@@ -178,7 +272,7 @@ describe("schedule tool — create", () => {
     });
     expect(text(r as any)).toContain("kind=shell");
     expect(text(r as any)).toContain("tier=mutate");
-    const job = store.listForCwd(project)[0]!;
+    const job = store.listForCwd(project, "session-a")[0]!;
     expect(job.action).toBe("shell");
     expect(job.command).toBe("npm test");
     expect(job.wakeOn).toBe("failure");
@@ -195,7 +289,7 @@ describe("schedule tool — create", () => {
       prompt: "stand up",
       every: "1h",
     });
-    const job = store.listForCwd(project)[0]!;
+    const job = store.listForCwd(project, "session-a")[0]!;
     expect(job.action).toBe("notify");
     expect(job.prompt).toBe("stand up");
   });
@@ -281,7 +375,7 @@ describe("schedule tool — create", () => {
       once: "5m",
     });
     expect(text(a as any)).toContain("once in 5m");
-    const onceJob = store.listForCwd(project)[0]!;
+    const onceJob = store.listForCwd(project, "session-a")[0]!;
     expect(onceJob.schedule.type).toBe("once");
     expect(onceJob.terminated).toBeNull();
 
@@ -296,7 +390,7 @@ describe("schedule tool — create", () => {
     });
     expect(text(b as any)).toContain("Created job");
     const pollJob = store
-      .listForCwd(project)
+      .listForCwd(project, "session-a")
       .find((j) => j.name === "poll")!;
     expect(pollJob.maxRuns).toBe(10);
   });
@@ -532,10 +626,11 @@ describe("schedule tool — misc branches", () => {
   it("create applies defaults when tier/scope/missedWindow are omitted", async () => {
     const { exec, store, project } = setup();
     await exec({ action: "create", name: "d", prompt: "p", every: "1h" });
-    const j = store.listForCwd(project)[0]!;
+    const j = store.listForCwd(project, "session-a")[0]!;
     expect(j.tier).toBe("read_only");
     expect(j.missedWindow).toBe("catch_up_one");
-    expect(j.scope).toBe("global"); // temp project has no .omp → defaultScope = global
+    expect(j.scope).toBe("session");
+    expect(j.sessionId).toBe("session-a");
   });
 
   it("run_now requires an id", async () => {

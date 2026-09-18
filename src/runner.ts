@@ -34,7 +34,11 @@ import {
   decideDue,
   idempotencyKeyFor,
 } from "./policy.js";
-import { PrivilegeGuard } from "./privilege.js";
+import {
+  hasShellCapability,
+  PrivilegeGuard,
+  SHELL_CAPABILITY_REQUIRED,
+} from "./privilege.js";
 import {
   buildFirePrompt,
   buildShellFollowUpPrompt,
@@ -147,6 +151,7 @@ export class ScheduleRunner {
     ctx: ExtensionContext,
     meta: { source: FireSource; jobIds?: string[] },
   ): Promise<ScheduledJob[]> {
+    if (!this.canRun(meta.source)) return [];
     if (meta.source === "run_now") {
       const result = this.waveChain.then(() => this.runWave(ctx, meta));
       this.waveChain = result.then(
@@ -160,10 +165,18 @@ export class ScheduleRunner {
     return this.runWave(ctx, meta);
   }
 
+  private canRun(source: FireSource): boolean {
+    if (hasShellCapability(this.opts.pi)) return true;
+    if (source === "run_now") throw new Error(SHELL_CAPABILITY_REQUIRED);
+    return false;
+  }
+
   private async runWave(
     ctx: ExtensionContext,
     meta: { source: FireSource; jobIds?: string[] },
   ): Promise<ScheduledJob[]> {
+    // run_now may have waited behind another wave while capabilities changed.
+    if (!this.canRun(meta.source)) return [];
     if (this.waveActive && meta.source !== "run_now") return [];
     this.waveActive = true;
 
@@ -198,6 +211,7 @@ export class ScheduleRunner {
 
       for (const job of candidates) {
         if (!this.isCurrentSession(ctx, sessionId)) break;
+        if (!this.canRun(meta.source)) break;
         const forced = meta.source === "run_now";
         const result = await this.processOne(ctx, job, {
           source: meta.source,
@@ -307,11 +321,11 @@ export class ScheduleRunner {
     }
 
     if (action === "message") {
-      const body = job.prompt.trim() || job.name;
+      const msg = notifyLabel(job);
       this.opts.pi.sendMessage(
         {
           customType: "omp-schedule",
-          content: body,
+          content: msg,
           display: true,
           details: { jobId: job.id, action: "message", runId: opts.runId },
         },
@@ -357,7 +371,7 @@ export class ScheduleRunner {
 
     if (ctx.hasUI) {
       ctx.ui.notify(
-        `[omp-schedule] running shell "${job.name}": ${command}`,
+        `[omp-schedule:${job.scope}] running shell "${job.name}": ${command}`,
         "info",
       );
     }
@@ -378,9 +392,12 @@ export class ScheduleRunner {
       stderr: truncateOutput(execResult.stderr),
     };
 
-    if (!this.isCurrentSession(ctx, opts.sessionId)) {
+    if (
+      !this.isCurrentSession(ctx, opts.sessionId) ||
+      !hasShellCapability(this.opts.pi)
+    ) {
       return {
-        detail: `shell exit=${lastShell.code} session-switched`,
+        detail: `shell exit=${lastShell.code} delivery-suppressed`,
         wokeAgent: false,
         lastShell,
       };
@@ -389,7 +406,7 @@ export class ScheduleRunner {
     this.opts.pi.sendMessage?.(
       {
         customType: "omp-schedule",
-        content: `Shell "${job.name}" exit ${lastShell.code}${lastShell.killed ? " (killed)" : ""}: ${command}`,
+        content: `[omp-schedule:${job.scope}] Shell "${job.name}" exit ${lastShell.code}${lastShell.killed ? " (killed)" : ""}: ${command}`,
         display: true,
         details: { jobId: job.id, action: "shell", runId: opts.runId, result: lastShell },
       },
@@ -595,11 +612,11 @@ export class ScheduleRunner {
       if (this.isCurrentSession(ctx, opts.sessionId)) {
         if (ctx.hasUI) {
           ctx.ui.notify(
-            `[omp-schedule] failed to fire "${job.name}": ${message}`,
+            `[omp-schedule:${job.scope}] failed to fire "${job.name}": ${message}`,
             "error",
           );
         } else {
-          console.error(`[omp-schedule] failed to fire "${job.name}": ${message}`);
+          console.error(`[omp-schedule:${job.scope}] failed to fire "${job.name}": ${message}`);
         }
       }
       // Advance on error so we don't hot-loop a broken delivery path.

@@ -49,6 +49,7 @@ describe("schedule tool — create rate limit (isolated)", () => {
     } | null = null;
     const pi = {
       typebox: TypeBox,
+      getActiveTools: () => ["bash", "schedule"],
       registerTool: (t: typeof tool) => {
         tool = t;
       },

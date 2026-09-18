@@ -83,14 +83,14 @@ schedule
   maxRuns?:       max deliveries (ok+error) before auto-disable
   every?:         "30m" | "2h" | "1d"   (xor dailyAt/once)
   dailyAt?:       "09:00"               (xor every/once)
-  scope?:         "global" | "project" | "session"  (default: project if .omp exists, otherwise global)
+  scope?:         "global" | "project" | "session"  (default: session)
   missedWindow?:  "catch_up_one" | "skip"   (default catch_up_one)
   tier?:          "read_only" | "suggest" | "mutate"  (default read_only; shell→mutate)
   id?:            job id
   limit?:         history row count
 ```
 
-`scope="session"` is explicit only. A create response always states the selected
+The default scope is `session`. A create response always states the selected
 scope, including when the tool chose the default.
 
 Session jobs live in a separate file for the creating OMP session ID. Only that
@@ -112,6 +112,12 @@ garbage collection.
 | **message** | Session custom message (display only) | no |
 
 Shell jobs always store `tier=mutate` (command runs outside the agent tool path). Prefer `wakeOn=failure` for CI polls so success is silent.
+
+The calling session must have an active `bash` tool to create, change, or run
+schedules. Without it, only `list` and `history` are allowed, and automatic due
+checks do no work. This prevents read-only scouts from using scheduled commands
+to bypass their tool restrictions. Delegate CLI investigations to a shell-capable
+worker and execute them directly, not through the scheduler.
 
 ### Lifecycle: `once` and `maxRuns`
 

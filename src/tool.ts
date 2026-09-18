@@ -20,6 +20,7 @@ import {
   DEFAULT_TIER,
   LIMITS,
 } from "./policy.js";
+import { hasShellCapability, SHELL_CAPABILITY_REQUIRED } from "./privilege.js";
 import {
   formatRelative,
   formatSchedule,
@@ -229,7 +230,7 @@ export function registerScheduleTool(
       "Create kind: prompt (default) | shell | notify | message. " +
       'Schedules: every "30m"/"2h"/"1d" or dailyAt "09:00". ' +
       "Scopes: global, project, or session. " +
-      "Defaults: scope=project when .omp exists, otherwise global; " +
+      "Defaults: scope=session; " +
       "tier=read_only (shell→mutate), missedWindow=catch_up_one. " +
       "Due jobs fire on OMP session start/switch (unless OMP was launched with an initial prompt) " +
       "and while the session is open. Session-scoped jobs never fire in another session. " +
@@ -241,6 +242,15 @@ export function registerScheduleTool(
       const sessionId = ctx.sessionManager.getSessionId();
 
       try {
+        if (
+          params.action !== "list" &&
+          params.action !== "history" &&
+          !hasShellCapability(pi)
+        ) {
+          return textResult(`Error: ${SHELL_CAPABILITY_REQUIRED}`, {
+            error: "shell_capability_required",
+          });
+        }
         switch (params.action) {
           case "create":
             return handleCreate(store, params, cwd, sessionId);
@@ -282,7 +292,11 @@ export function registerScheduleTool(
           return textResult(`Error: ${err.message}`, { error: err.message });
         }
         const message = err instanceof Error ? err.message : String(err);
-        return textResult(`Error: ${message}`, { error: message });
+        return textResult(`Error: ${message}`, {
+          error: message === SHELL_CAPABILITY_REQUIRED
+            ? "shell_capability_required"
+            : message,
+        });
       }
     },
   });
@@ -332,7 +346,7 @@ function handleCreate(
     dailyAt: clean.dailyAt,
     once: clean.once,
   });
-  const scope: ScheduleScope = clean.scope ?? defaultScope(cwd);
+  const scope: ScheduleScope = clean.scope ?? defaultScope();
   const missedWindow = clean.missedWindow ?? DEFAULT_MISSED_WINDOW;
   const tier: PrivilegeTier = normalized.forceTierMutate
     ? "mutate"

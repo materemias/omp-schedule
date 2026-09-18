@@ -38,6 +38,7 @@ export function buildFirePrompt(input: FirePromptInput): string {
     `jobId: ${job.id}`,
     `name: ${job.name}`,
     `action: ${action}`,
+    `scope: ${job.scope}`,
     `schedule: ${schedule}`,
     `source: ${kind}`,
     `tier: ${tier}`,
@@ -80,6 +81,7 @@ export function buildShellFollowUpPrompt(input: ShellFollowUpInput): string {
     `jobId: ${job.id}`,
     `name: ${job.name}`,
     `action: shell`,
+    `scope: ${job.scope}`,
     `schedule: ${schedule}`,
     `source: ${kind}`,
     `tier: ${tier}`,
@@ -117,8 +119,8 @@ export function buildShellFollowUpPrompt(input: ShellFollowUpInput): string {
   ].join("\n");
 }
 
-/** Compact notify / list label for a job. */
+/** Compact notify toast label; carries the scope so toasts are attributable. */
 export function notifyLabel(job: ScheduledJob): string {
   const body = job.prompt.trim() || job.name;
-  return `[omp-schedule] ${job.name}: ${body}`;
+  return `[omp-schedule:${job.scope}] ${job.name}: ${body}`;
 }
