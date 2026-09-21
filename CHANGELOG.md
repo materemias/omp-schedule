@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Wait for `session_start` before arming session-boundary timers. ACP resume can
+  emit a session switch before extension action APIs are initialized; deferring
+  that work prevents a startup crash without weakening shell-capability checks.
 - Require the caller's active `bash` capability for schedule mutations and job
   execution, including automatic due checks and queued runs. Read-only scouts
   retain `list`/`history` but cannot use the scheduler as a substitute shell.

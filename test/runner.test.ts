@@ -460,6 +460,56 @@ describe("ScheduleRunner — policies & failure", () => {
 });
 
 describe("ScheduleRunner — attach (session lifecycle)", () => {
+  it("waits for session_start before arming boundary work and preserves capability checks", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness();
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+    const getActiveTools = vi.spyOn(h.pi, "getActiveTools").mockImplementation(() => {
+      throw new Error("Extension runtime not initialized");
+    });
+    h.runner.attach();
+
+    try {
+      await h.emit("session_switch", { type: "session_switch", reason: "resume" });
+      await h.emit("session_branch", { type: "session_branch" });
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(getActiveTools).not.toHaveBeenCalled();
+      expect(h.sent).toHaveLength(0);
+      expect(h.store.get(job.id, h.project)?.lastStatus).toBeNull();
+
+      getActiveTools.mockRestore();
+      await h.emit("session_start", { type: "session_start" });
+      expect(h.sent).toHaveLength(1);
+      expect(h.store.get(job.id, h.project)?.lastStatus).toBe("ok");
+
+      for (const type of ["session_switch", "session_branch"]) {
+        const next = h.createGlobal(type);
+        h.forceDue(next.id);
+        const sentBefore = h.sent.length;
+        h.setActiveTools(["read", "schedule"]);
+        await h.emit(type, { type, reason: "fork" });
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(h.sent).toHaveLength(sentBefore);
+        expect(h.store.get(next.id, h.project)?.lastStatus).toBeNull();
+        await expect(
+          h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [next.id] }),
+        ).rejects.toThrow(/active bash tool/);
+
+        h.setActiveTools(["read", "bash", "schedule"]);
+        await h.emit(type, { type, reason: "fork" });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.sent.at(-1)?.content).toContain(type);
+        expect(h.store.get(next.id, h.project)?.lastStatus).toBe("ok");
+      }
+    } finally {
+      getActiveTools.mockRestore();
+      await h.emit("session_shutdown");
+    }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("OMP startup + CLI initial prompt skips firing; session_switch still fires", async () => {
     // startup WITH initial prompt → skip
     const a = makeHarness({ hasInitialPrompt: true });
@@ -475,6 +525,7 @@ describe("ScheduleRunner — attach (session lifecycle)", () => {
     const jb = b.createGlobal();
     b.forceDue(jb.id);
     b.runner.attach();
+    await b.emit("session_start", { type: "session_start" });
     await b.emit("session_switch", {
       type: "session_switch",
       reason: "new",
@@ -499,6 +550,7 @@ describe("ScheduleRunner — attach (session lifecycle)", () => {
     const job = h.createGlobal();
     h.forceDue(job.id);
     h.runner.attach();
+    await h.emit("session_start", { type: "session_start" });
 
     await h.emit("session_switch", {
       type: "session_switch",
@@ -539,6 +591,7 @@ describe("ScheduleRunner — attach (session lifecycle)", () => {
     h.forceDue(catchUp.id, T0, "session-a");
     h.forceDue(skip.id, T0, "session-a");
     h.runner.attach();
+    await h.emit("session_start", { type: "session_start" });
 
     h.setSessionId("session-new");
     await h.emit("session_switch", {

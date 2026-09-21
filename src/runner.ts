@@ -71,6 +71,7 @@ export interface RunnerOptions {
 export class ScheduleRunner {
   private timer: ReturnType<typeof setInterval> | null = null;
   private switchTimer: ReturnType<typeof setTimeout> | null = null;
+  private sessionStarted = false;
   private waveActive = false;
   /** Serializes waves so run_now waits instead of silently no-oping. */
   private waveChain: Promise<unknown> = Promise.resolve();
@@ -100,6 +101,7 @@ export class ScheduleRunner {
     this.privilege.attach(pi);
 
     pi.on("session_start", async (_event, ctx) => {
+      this.sessionStarted = true;
       this.stopTicker();
       this.stopSwitchTimer();
 
@@ -121,6 +123,7 @@ export class ScheduleRunner {
     });
 
     pi.on("session_shutdown", () => {
+      this.sessionStarted = false;
       this.stopTicker();
       this.stopSwitchTimer();
       this.privilege.clear();
@@ -128,6 +131,9 @@ export class ScheduleRunner {
   }
 
   private restartAfterSessionBoundary(ctx: ExtensionContext): void {
+    // Initial session selection can precede runtime action API initialization.
+    if (!this.sessionStarted) return;
+
     this.stopTicker();
     this.stopSwitchTimer();
     this.startTicker(ctx);
