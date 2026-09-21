@@ -12,6 +12,35 @@ Give the agent a way to schedule work like:
 - status polls
 - any other recurring prompt-driven task
 
+## This fork
+
+This repository is the actively maintained fork of
+[`hanhan3344/omp-schedule`](https://github.com/hanhan3344/omp-schedule); that
+upstream repo has had no commits since August 2026. Install from this fork:
+
+```bash
+omp plugin install github:materemias/omp-schedule
+```
+
+Pin a commit SHA instead of the branch for a fixed source snapshot.
+
+Additions since the fork (full detail in [CHANGELOG.md](CHANGELOG.md)):
+
+- **Session-scoped schedules** — a `session` scope alongside `global` and
+  `project`. Session jobs live in per-session files; only the owning OMP
+  session can list, manage, inspect history, force, or fire them. They stay
+  dormant while their owner is closed and resume under the job's
+  `missedWindow` policy.
+- **Session is the default scope** — `create` defaults to `session` instead of
+  guessing `project` vs `global` from the cwd. Fired prompts, notify toasts,
+  message notes, and shell start/exit notices all state their scope.
+- **Bash capability required** — schedule mutations and job execution require
+  an active `bash` tool. Read-only sessions keep `list`/`history` and cannot
+  use the scheduler as a substitute shell, including for automatic due checks.
+- **Session-boundary lifecycle guard** — session-boundary timers arm only
+  after `session_start`, so an ACP resume that emits a session switch before
+  extension action APIs initialize cannot crash the extension.
+
 ## Install
 
 Install the tagged release:
@@ -243,6 +272,30 @@ npm install
 npm test
 npm run typecheck
 ```
+
+## Syncing with upstream
+
+The `upstream` remote tracks `hanhan3344/omp-schedule`. Check for new upstream
+work:
+
+```bash
+git fetch upstream
+git log main..upstream/main --oneline      # new upstream commits
+git diff main...upstream/main --stat       # their diff vs the merge base
+```
+
+If upstream ever moves again, merge and re-verify:
+
+```bash
+git merge upstream/main
+npm run check                              # tsc --noEmit && vitest run
+git push origin main
+```
+
+Expect conflicts in the fork-only areas if upstream rewrites the same files:
+session scope (`src/store.ts`, `src/runner.ts`), capability guards
+(`src/privilege.ts`, `src/tool.ts`), and the lifecycle guard
+(`src/runner.ts`).
 
 ## Release model
 
