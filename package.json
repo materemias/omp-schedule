@@ -1,0 +1,26 @@
+{
+	"name": "omp-schedule",
+	"version": "0.1.0",
+	"description": "Send a prompt back into the same omp session after a delay or on an interval, from /schedule or the agent's own tool",
+	"type": "module",
+	"omp": {
+		"extensions": ["./schedule.ts"]
+	},
+	"scripts": {
+		"test": "bun test"
+	},
+	"keywords": ["omp", "plugin", "schedule", "reminder"],
+	"author": "materemias",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/materemias/omp-schedule.git"
+	},
+	"bugs": {
+		"url": "https://github.com/materemias/omp-schedule/issues"
+	},
+	"homepage": "https://github.com/materemias/omp-schedule#readme",
+	"engines": {
+		"omp": ">=18.16.0"
+	}
+}
