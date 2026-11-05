@@ -26,6 +26,7 @@ const MAX_DURATION_MS = 365 * 86_400_000; // formatTime shows no year
 export const RESUME_GRACE_MS = 2000;
 // A timer this late still counts as on time, so a run stays on its slot and the last one in a window fires.
 const MAX_LATE_MS = 5000;
+const ROW_PROMPT_CHARS = 50;
 const USAGE = "Usage: /schedule 30m <prompt> | /schedule every 2h [for 1d] <prompt> | /schedule cancel <id|all>";
 
 type Job = { id: number; prompt: string; everyMs?: number; endsAt?: number; dueAt: number };
@@ -113,8 +114,9 @@ export default function (pi, dir = DIR) {
 	function arm() {
 		disarm();
 		const next = jobs.reduce((a, j) => (a && a.dueAt <= j.dueAt ? a : j), undefined);
-		const more = jobs.length > 1 ? ` +${jobs.length - 1}` : "";
-		ctx.ui.setStatus("schedule", next ? `⏰ ${formatTime(next.dueAt)}${more}` : undefined);
+		const more = jobs.length > 1 ? ` · +${jobs.length - 1} more` : "";
+		const row = next && `⏰ ${formatTime(next.dueAt)} · #${next.id} ${shortPrompt(next, ROW_PROMPT_CHARS)} · ${describeRepeat(next)}${more}`;
+		ctx.ui.setWidget("schedule", row ? [row] : undefined, { placement: "aboveEditor" });
 		if (next) timer = ctx.setTimeout(fireDue, Math.min(Math.max(next.dueAt - Date.now(), 0), MAX_TIMER_MS));
 	}
 
@@ -199,8 +201,9 @@ export default function (pi, dir = DIR) {
 		return `every ${formatDuration(j.everyMs)}${j.endsAt ? ` until ${formatTime(j.endsAt)}` : ""}`;
 	}
 
-	function shortPrompt(j: Job): string {
-		return j.prompt.replace(/\s+/g, " ").slice(0, 80);
+	function shortPrompt(j: Job, limit = 80): string {
+		const text = j.prompt.replace(/\s+/g, " ");
+		return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 	}
 
 	function describeJob(j: Job): string {

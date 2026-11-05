@@ -21,7 +21,7 @@ type ToolResult = { content: { text: string }[] };
 type Harness = {
 	sent: [string, string][];
 	notes: [string, string][];
-	status: (string | undefined)[];
+	widget: (string | undefined)[];
 	errors: unknown[];
 	dialog: { rows: string[]; details: (string | undefined)[]; pick: (rows: string[]) => string | undefined; confirm: boolean };
 	command(args: string): Promise<unknown>;
@@ -37,7 +37,7 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean; settle?
 	const handlers: Record<string, Handler> = {};
 	const sent: Harness["sent"] = [];
 	const notes: Harness["notes"] = [];
-	const status: Harness["status"] = [];
+	const widget: Harness["widget"] = [];
 	const errors: Harness["errors"] = [];
 	const dialog: Harness["dialog"] = { rows: [], details: [], pick: () => undefined, confirm: true };
 	let execute: Handler | undefined;
@@ -55,7 +55,7 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean; settle?
 				return dialog.pick(dialog.rows);
 			},
 			confirm: async () => dialog.confirm,
-			setStatus: (_key: string, value?: string) => status.push(value),
+			setWidget: (_key: string, lines?: string[]) => widget.push(lines?.[0]),
 		},
 		// omp's managed timers route a throwing callback to its error channel.
 		setTimeout: (callback: () => void, ms: number) =>
@@ -88,7 +88,7 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean; settle?
 	const harness: Harness = {
 		sent,
 		notes,
-		status,
+		widget,
 		errors,
 		dialog,
 		command: async (args) => handlers.command(args, ctx),
@@ -132,7 +132,7 @@ test("a job fires the prompt verbatim in its session and then disappears", async
 	vi.advanceTimersByTime(1);
 	expect(t.sent).toEqual([["line one\nline two", "prompt"]]);
 	expect(fs.existsSync(jobFile("a"))).toBe(false);
-	expect(t.status.at(-1)).toBeUndefined();
+	expect(t.widget.at(-1)).toBeUndefined();
 });
 
 test("another session never fires or lists a session's jobs", async () => {
@@ -288,7 +288,19 @@ test("jobs survive a restart of the session's process", async () => {
 	await second.command("");
 	expect(second.dialog.rows[0]).toBe("#1  keep going");
 	expect(second.dialog.details[0]).toContain("every 1h");
-	expect(second.status.at(-1)).toContain("⏰");
+	expect(second.widget.at(-1)).toContain("⏰");
+});
+
+test("the row above the composer shows the soonest job from the moment it is scheduled", async () => {
+	const t = start("a");
+	await t.command("every 2h for 1d check the CI run");
+	expect(t.widget.at(-1)).toContain("#1 check the CI run · every 2h until");
+	await t.command("1h tell a joke");
+	expect(t.widget.at(-1)).toEndWith("#2 tell a joke · once · +1 more");
+	await t.command(`1m ${"x".repeat(200)}`);
+	expect(t.widget.at(-1)).toEndWith(`#3 ${"x".repeat(49)}… · once · +2 more`);
+	await t.command("cancel all");
+	expect(t.widget.at(-1)).toBeUndefined();
 });
 
 test("the tool schedules into the same session and treats blank fields as absent", async () => {

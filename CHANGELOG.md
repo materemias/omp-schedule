@@ -6,6 +6,7 @@
 
 - `/schedule every 10m for 2h <prompt>` ends a repeating job after a time window. The agent's `schedule` tool takes the same limit as `for`.
 - `/schedule` suggests `for` windows after an interval, and offers `cancel all` whenever the session has jobs.
+- A row above the composer shows the next job, its time and its repeat from the moment you schedule it. It replaces the clock in the footer.
 - `/schedule` opens a dialog with one row per job. Picking a row cancels that job after a confirmation.
 
 ## 0.1.0 (2026-11-05)

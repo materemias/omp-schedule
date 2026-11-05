@@ -23,7 +23,7 @@ Restart omp. To update, run `omp plugin upgrade omp-schedule@omp-schedule`.
 /schedule cancel <id|all>
 ```
 
-A duration is `30s`, `10m`, `2h`, `1d`, or a combination such as `1h30m`. An interval must be at least `1m`. The footer shows the next fire time, and `+2` after it means two more jobs are waiting.
+A duration is `30s`, `10m`, `2h`, `1d`, or a combination such as `1h30m`. An interval must be at least `1m`. A row above the composer shows the next job from the moment you schedule it, and `+2 more` at its end means two more jobs are waiting.
 
 While you type, the command suggests what comes next: units for a bare number (`2` offers `2m`, `2h`, `2d`, `2s`) with the time each would fire, valid intervals after `every`, `for` windows after the interval, and this session's job ids and `cancel all` after `cancel`. Press `Tab` to take one.
 
