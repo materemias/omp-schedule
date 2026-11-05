@@ -6,6 +6,8 @@
 // Jobs live in ~/.omp/agent/schedule/<sessionId>.json, so they survive /restart and resume.
 // A closed session fires nothing; on resume each overdue job fires once and recurring jobs continue
 // from that moment. Forks, branches and handoffs get a new session ID and no jobs.
+// `every ... for` ends a recurring job after a time window; a window that closes while the session
+// is closed fires nothing more.
 // Sessions without a UI, such as print mode and subagents, neither schedule nor fire.
 // @ts-nocheck
 
@@ -22,15 +24,23 @@ const MAX_DURATION_MS = 365 * 86_400_000; // formatTime shows no year
 // I/O and other extensions' async handlers in between, and no event marks the end. A prompt sent
 // before that would be lost, so overdue jobs wait this long after a session becomes active.
 export const RESUME_GRACE_MS = 2000;
-const USAGE = "Usage: /schedule 30m <prompt> | /schedule every 2h <prompt> | /schedule cancel <id|all>";
+// A timer this late still counts as on time, so a run stays on its slot and the last one in a window fires.
+const MAX_LATE_MS = 5000;
+const USAGE = "Usage: /schedule 30m <prompt> | /schedule every 2h [for 1d] <prompt> | /schedule cancel <id|all>";
 
-type Job = { id: number; prompt: string; everyMs?: number; dueAt: number };
+type Job = { id: number; prompt: string; everyMs?: number; endsAt?: number; dueAt: number };
 
 function parseDuration(text: string): number | undefined {
 	if (!/^(\d+[dhms])+$/.test(text)) return undefined;
 	let ms = 0;
 	for (const [, n, unit] of text.matchAll(/(\d+)([dhms])/g)) ms += Number(n) * UNIT_MS[unit];
 	return ms > 0 && ms <= MAX_DURATION_MS ? ms : undefined;
+}
+
+function requireDuration(text: string): number {
+	const ms = parseDuration(text);
+	if (!ms) throw new Error(`Bad duration "${text}": use 30s, 10m, 2h, 1d or 1h30m, up to 365d.`);
+	return ms;
 }
 
 function formatDuration(ms: number): string {
@@ -55,7 +65,8 @@ function isJob(j): j is Job {
 		Number.isInteger(j?.id) &&
 		typeof j.prompt === "string" &&
 		Number.isFinite(j.dueAt) &&
-		(j.everyMs === undefined || j.everyMs > 0)
+		(j.everyMs === undefined || j.everyMs > 0) &&
+		(j.endsAt === undefined || Number.isFinite(j.endsAt))
 	);
 }
 
@@ -76,6 +87,13 @@ function save(file: string, jobs: Job[]): void {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(`${file}.tmp`, JSON.stringify(jobs, null, 2));
 	fs.renameSync(`${file}.tmp`, file);
+}
+
+// When a job that has just come due runs next, or undefined if it is finished.
+function nextRun(job: Job, now: number): number | undefined {
+	if (!job.everyMs) return undefined;
+	const next = (now - job.dueAt <= MAX_LATE_MS ? job.dueAt : now) + job.everyMs;
+	return next > (job.endsAt ?? Infinity) ? undefined : next;
 }
 
 export default function (pi, dir = DIR) {
@@ -111,10 +129,13 @@ export default function (pi, dir = DIR) {
 		// An idle agent starts a turn on the first prompt; later ones queue behind it.
 		let busy = !ctx.isIdle();
 		for (const job of due) {
-			pi.sendUserMessage(job.prompt, busy ? { deliverAs: "followUp" } : undefined);
-			busy = true;
-			if (job.everyMs) job.dueAt = now + job.everyMs;
-			else jobs = jobs.filter((j) => j !== job);
+			if (job.endsAt === undefined || now - job.endsAt <= MAX_LATE_MS) {
+				pi.sendUserMessage(job.prompt, busy ? { deliverAs: "followUp" } : undefined);
+				busy = true;
+			}
+			const next = nextRun(job, now);
+			if (next === undefined) jobs = jobs.filter((j) => j !== job);
+			else job.dueAt = next;
 		}
 		// A failed save reaches omp's extension error channel; the other jobs must still fire.
 		try {
@@ -141,21 +162,24 @@ export default function (pi, dir = DIR) {
 		if (c.sessionManager.getSessionId() !== sessionId) activate(c);
 	}
 
-	function addJob(prompt: string, duration: string, repeat: boolean): string {
-		const ms = parseDuration(duration);
-		if (!ms) throw new Error(`Bad duration "${duration}": use 30s, 10m, 2h, 1d or 1h30m, up to 365d.`);
+	function addJob(prompt: string, duration: string, repeat: boolean, window?: string): string {
+		const ms = requireDuration(duration);
 		if (repeat && ms < MIN_EVERY_MS) throw new Error("Interval must be at least 1m.");
+		const windowMs = window ? requireDuration(window) : undefined;
+		if (windowMs !== undefined && windowMs < ms) throw new Error("`for` must be at least as long as the interval.");
+		const now = Date.now();
 		const job: Job = {
 			id: lastId + 1,
 			prompt,
 			everyMs: repeat ? ms : undefined,
-			dueAt: Date.now() + ms,
+			endsAt: windowMs && now + windowMs,
+			dueAt: now + ms,
 		};
 		save(file, [...jobs, job]);
 		lastId = job.id;
 		jobs.push(job);
 		arm();
-		return `#${job.id} at ${formatTime(job.dueAt)}${repeat ? `, then every ${formatDuration(ms)}` : ""}`;
+		return `#${job.id} at ${formatTime(job.dueAt)}${repeat ? `, then ${describeRepeat(job)}` : ""}`;
 	}
 
 	function cancelJobs(target: string): string {
@@ -168,9 +192,17 @@ export default function (pi, dir = DIR) {
 		return `Cancelled ${cancelled} job(s).`;
 	}
 
+	function describeRepeat(j: Job): string {
+		if (!j.everyMs) return "once";
+		return `every ${formatDuration(j.everyMs)}${j.endsAt ? ` until ${formatTime(j.endsAt)}` : ""}`;
+	}
+
+	function shortPrompt(j: Job): string {
+		return j.prompt.replace(/\s+/g, " ").slice(0, 80);
+	}
+
 	function describeJob(j: Job): string {
-		const repeat = j.everyMs ? `every ${formatDuration(j.everyMs)}` : "once";
-		return `${formatTime(j.dueAt)}  ${repeat}  ${j.prompt.replace(/\s+/g, " ").slice(0, 80)}`;
+		return `${formatTime(j.dueAt)}  ${describeRepeat(j)}  ${shortPrompt(j)}`;
 	}
 
 	function listJobs(): string | undefined {
@@ -178,39 +210,46 @@ export default function (pi, dir = DIR) {
 		return jobs.map((j) => `#${j.id}  ${describeJob(j)}`).join("\n");
 	}
 
-	// Durations for the word being typed: units for bare digits, the fire time once one is complete.
-	function durationItems(head: string, word: string, repeat: boolean) {
+	// Durations for the word being typed: units for bare digits, the outcome once one is complete.
+	function durationItems(head: string, word: string, minMs: number, describe: (ms: number) => string) {
 		const units = ["m", "h", "d", "s"].filter((u) => !word.includes(u));
 		const specs = word === "" ? ["10m", "1h", "1d"] : /^(\d+[dhms])*\d+$/.test(word) ? units.map((u) => word + u) : [word];
 		return specs.flatMap((spec) => {
 			const ms = parseDuration(spec);
-			if (!ms || (repeat && ms < MIN_EVERY_MS)) return [];
-			const when = repeat ? `every ${formatDuration(ms)}, first at` : "once at";
-			return [{ value: `${head}${spec} `, label: `${spec} <prompt>`, description: `${when} ${formatTime(Date.now() + ms)}` }];
+			if (!ms || ms < minMs) return [];
+			return [{ value: `${head}${spec} `, label: `${spec} <prompt>`, description: describe(ms) }];
 		});
 	}
 
 	// The editor replaces everything after "/schedule " with the picked value.
 	function completions(args: string) {
 		const text = args.trimStart();
+		const at = (ms: number) => formatTime(Date.now() + ms);
 		const every = text.match(/^every\s+(\S*)$/);
-		if (every) return durationItems("every ", every[1], true);
+		if (every) return durationItems("every ", every[1], MIN_EVERY_MS, (ms) => `every ${formatDuration(ms)}, first at ${at(ms)}`);
+		const clause = text.match(/^every\s+(\S+)\s+(for\s+)?(\S*)$/);
+		if (clause) {
+			const head = `every ${clause[1]} for `;
+			const everyMs = parseDuration(clause[1]);
+			if (!everyMs) return null;
+			if (clause[2]) return durationItems(head, clause[3], everyMs, (ms) => `until ${at(ms)}`);
+			if (!"for ".startsWith(clause[3])) return [];
+			return [{ value: head, label: "for <duration> <prompt>", description: "stop repeating after this long" }];
+		}
+		const cancelAll = { value: "cancel all", label: "cancel all", description: `remove all ${jobs.length} job(s) of this session` };
 		const cancel = text.match(/^cancel\s+#?(\S*)$/);
 		if (cancel) {
 			const ids = jobs.filter((j) => String(j.id).startsWith(cancel[1]));
 			const items = ids.map((j) => ({ value: `cancel ${j.id}`, label: `#${j.id}`, description: describeJob(j) }));
-			if (jobs.length > 1 && "all".startsWith(cancel[1])) {
-				items.push({ value: "cancel all", label: "all", description: `all ${jobs.length} jobs` });
-			}
-			return items;
+			return jobs.length > 0 && "all".startsWith(cancel[1]) ? [...items, cancelAll] : items;
 		}
 		if (/\s/.test(text)) return null; // the prompt has started
 		const actions = [
-			{ value: "every ", label: "every <interval> <prompt>", description: "repeat the prompt, at least 1m apart" },
+			{ value: "every ", label: "every <interval> [for <duration>] <prompt>", description: "repeat the prompt, at least 1m apart" },
 			{ value: "list", label: "list", description: `this session's jobs (${jobs.length})` },
 		];
-		if (jobs.length > 0) actions.push({ value: "cancel ", label: "cancel <id|all>", description: "remove a job" });
-		return [...durationItems("", text, false), ...actions.filter((a) => a.value.startsWith(text))];
+		if (jobs.length > 0) actions.push({ value: "cancel ", label: "cancel <id|all>", description: "remove a job" }, cancelAll);
+		return [...durationItems("", text, 0, (ms) => `once at ${at(ms)}`), ...actions.filter((a) => a.value.startsWith(text))];
 	}
 
 	pi.on("session_start", (_event, c) => activate(c));
@@ -222,7 +261,7 @@ export default function (pi, dir = DIR) {
 	});
 
 	pi.registerCommand("schedule", {
-		description: "Send a prompt to this session later: /schedule 30m <prompt> | every 2h <prompt> | cancel <id|all>",
+		description: "Send a prompt to this session later: /schedule 30m <prompt> | every 2h [for 1d] <prompt> | cancel <id|all>",
 		getArgumentCompletions: completions,
 		handler: async (args: string, c) => {
 			try {
@@ -239,7 +278,11 @@ export default function (pi, dir = DIR) {
 				}
 				const job = text.match(/^(every\s+)?(\S+)\s+(\S[\s\S]*)$/);
 				if (!job || job[2] === "every" || job[2] === "cancel") throw new Error(USAGE);
-				c.ui.notify(addJob(job[3].trim(), job[2], Boolean(job[1])), "info");
+				// "for" and a digit opens a window, so a typo errors instead of repeating forever.
+				const limit = job[1] && job[3].match(/^for\s+(\d\S*)(\s+\S[\s\S]*)?$/);
+				if (limit && !limit[2]) throw new Error(USAGE);
+				const prompt = limit ? limit[2] : job[3];
+				c.ui.notify(addJob(prompt.trim(), job[2], Boolean(job[1]), limit?.[1]), "info");
 			} catch (err) {
 				c.ui.notify(err.message, "error");
 			}
@@ -264,6 +307,7 @@ export default function (pi, dir = DIR) {
 			),
 			in: Type.Optional(Type.String({ description: "Fire once after this delay: 30s, 10m, 2h, 1d or 1h30m" })),
 			every: Type.Optional(Type.String({ description: "Repeat at this interval, at least 1m, in the same format as `in`" })),
+			for: Type.Optional(Type.String({ description: "With `every`: stop repeating after this long, at least one interval" })),
 			id: Type.Optional(Type.String({ description: 'Job id, or "all"' })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, c) {
@@ -278,6 +322,7 @@ export default function (pi, dir = DIR) {
 		const prompt = params.prompt?.trim();
 		const delay = params.in?.trim();
 		const every = params.every?.trim();
+		const window = params.for?.trim();
 		const id = params.id?.trim();
 		switch (params.action) {
 			case "list":
@@ -288,7 +333,8 @@ export default function (pi, dir = DIR) {
 			case "create":
 				if (!prompt) throw new Error("create needs `prompt`.");
 				if (Boolean(delay) === Boolean(every)) throw new Error("create needs exactly one of `in` and `every`.");
-				return addJob(prompt, delay || every, Boolean(every));
+				if (window && !every) throw new Error("`for` needs `every`.");
+				return addJob(prompt, delay || every, Boolean(every), window);
 			default:
 				throw new Error(`Unknown action ${params.action}.`);
 		}

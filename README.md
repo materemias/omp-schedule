@@ -18,19 +18,22 @@ Restart omp. To update, run `omp plugin upgrade omp-schedule@omp-schedule`.
 ```
 /schedule 30m <prompt>         once, 30 minutes from now
 /schedule every 2h <prompt>    every 2 hours, first run in 2 hours
+/schedule every 10m for 2h <prompt>    every 10 minutes for 2 hours, then stop
 /schedule                      list this session's jobs
 /schedule cancel <id|all>
 ```
 
 A duration is `30s`, `10m`, `2h`, `1d`, or a combination such as `1h30m`. An interval must be at least `1m`. The footer shows the next fire time, and `+2` after it means two more jobs are waiting.
 
-While you type, the command suggests what comes next: units for a bare number (`2` offers `2m`, `2h`, `2d`, `2s`) with the time each would fire, valid intervals after `every`, and this session's job ids after `cancel`. Press `Tab` to take one.
+While you type, the command suggests what comes next: units for a bare number (`2` offers `2m`, `2h`, `2d`, `2s`) with the time each would fire, valid intervals after `every`, `for` windows after the interval, and this session's job ids and `cancel all` after `cancel`. Press `Tab` to take one.
+
+A `for` window ends a repeating job. `every 1h for 3h` runs three times, and the job disappears after the last run. The window must be at least one interval long. A prompt can still start with the word "for": only "for" followed by a digit opens a window.
 
 ## From the agent
 
 The `schedule` tool has three actions:
 
-- `create` takes `prompt` and either `in` (once) or `every` (repeating).
+- `create` takes `prompt` and either `in` (once) or `every` (repeating). `every` can take `for`, a window after which the job stops.
 - `list` shows this session's jobs.
 - `cancel` takes `id`, a job id or `all`.
 
@@ -44,7 +47,7 @@ Jobs are stored in `~/.omp/agent/schedule/<sessionId>.json`, so they survive `/r
 
 ## Limits
 
-- Nothing runs while the session is closed, because there is no daemon. On resume each overdue job fires once, and a recurring job counts its next run from that moment. Resuming in print mode (`omp -p`) leaves the jobs waiting for an interactive session.
+- Nothing runs while the session is closed, because there is no daemon. On resume each overdue job fires once, and a recurring job counts its next run from that moment. A job whose `for` window ended in the meantime is removed without firing. Resuming in print mode (`omp -p`) leaves the jobs waiting for an interactive session.
 - Forks, branches and handoffs get a new session ID and take no jobs with them. The jobs stay with the original session.
 - There is no clock-time schedule. For "at 20:00", give the delay. The agent works it out from the current time.
 - A slash command in a prompt stays plain text. omp doesn't run it.

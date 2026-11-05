@@ -315,10 +315,95 @@ test("completions offer units, valid intervals, the session's jobs, and stop onc
 	expect(values("every 30")).toEqual(["every 30m ", "every 30h ", "every 30d "]);
 	expect(values("400d")).toEqual([]);
 	expect(values("c")).toEqual([]);
+	expect(values("every 1h ")).toEqual(["every 1h for "]);
+	expect(values("every 1h check")).toEqual([]);
+	expect(values("every 2h for 1")).toEqual(["every 2h for 1d "]);
+	expect(values("every 2h for 3")).toEqual(["every 2h for 3h ", "every 2h for 3d "]);
+	expect(t.complete("every 2h for 1d check")).toBeNull();
 	await t.command("1h one");
 	await t.command("2h two");
-	expect(values("c")).toEqual(["cancel "]);
+	expect(values("c")).toEqual(["cancel ", "cancel all"]);
 	expect(values("cancel ")).toEqual(["cancel 1", "cancel 2", "cancel all"]);
-	expect(values("cancel #2")).toEqual(["cancel 2"]);
+	await t.command("cancel 2");
+	expect(values("cancel a")).toEqual(["cancel all"]);
+	await t.command("2h two");
+	expect(values("cancel #3")).toEqual(["cancel 3"]);
 	expect(t.complete("30m check the deploy")).toBeNull();
+});
+
+test("a `for` window fires its last slot and then ends the job", async () => {
+	const t = start("a");
+	await t.command("every 1h for 3h tick");
+	vi.advanceTimersByTime(3 * HOUR - 1);
+	expect(t.sent).toHaveLength(2);
+	vi.advanceTimersByTime(1);
+	expect(t.sent).toHaveLength(3);
+	expect(fs.existsSync(jobFile("a"))).toBe(false);
+	vi.advanceTimersByTime(3 * HOUR);
+	expect(t.sent).toHaveLength(3);
+});
+
+test("a window stops at the last slot inside it", async () => {
+	const t = start("a");
+	await t.command("every 1h for 2h30m tick");
+	vi.advanceTimersByTime(6 * HOUR);
+	expect(t.sent).toHaveLength(2);
+});
+
+test("a late timer doesn't lose the last slot of a window", () => {
+	const now = Date.now();
+	writeJobs("a", [{ id: 1, prompt: "tick", everyMs: HOUR, dueAt: now, endsAt: now + HOUR }]);
+	const t = start("a"); // fires late, after the resume grace
+	expect(t.sent).toHaveLength(1);
+	vi.advanceTimersByTime(HOUR);
+	expect(t.sent).toHaveLength(2);
+	expect(fs.existsSync(jobFile("a"))).toBe(false);
+});
+
+test("a window that closed while the session was closed fires nothing and clears the job", () => {
+	const now = Date.now();
+	writeJobs("a", [
+		{ id: 1, prompt: "expired", everyMs: HOUR, dueAt: now - 3 * HOUR, endsAt: now - HOUR },
+		{ id: 2, prompt: "last call", everyMs: HOUR, dueAt: now - 2 * HOUR, endsAt: now + HOUR / 2 },
+	]);
+	const t = start("a");
+	expect(t.sent).toEqual([["last call", "prompt"]]);
+	expect(fs.existsSync(jobFile("a"))).toBe(false);
+});
+
+test("a window survives a restart and shows in the listing", async () => {
+	const first = start("a");
+	await first.command("every 1h for 1d tick");
+	first.shutdown();
+	const second = start("a");
+	await second.command("");
+	expect(second.notes.at(-1)?.[1]).toContain("until");
+	expect(readJobs("a")[0].endsAt).toBeGreaterThan(Date.now());
+});
+
+test("the command tells a window from a prompt that starts with for", async () => {
+	const t = start("a");
+	await t.command("every 1h for each PR, check CI");
+	expect(readJobs("a")[0]).toMatchObject({ prompt: "for each PR, check CI" });
+	expect(readJobs("a")[0].endsAt).toBeUndefined();
+	await t.command("1h for 2h stays a prompt");
+	expect(readJobs("a")[1]).toMatchObject({ prompt: "for 2h stays a prompt" });
+	for (const bad of ["every 1h for 2x typo", "every 1h for 30m too short", "every 1h for 366d too long"]) {
+		await t.command(bad);
+		expect(t.notes.at(-1)?.[0]).toBe("error");
+	}
+	await t.command("every 1h for 2h");
+	expect(t.notes.at(-1)?.[1]).toStartWith("Usage:");
+	expect(readJobs("a")).toHaveLength(2);
+});
+
+test("the tool takes a window with `every` and refuses it without", async () => {
+	const t = start("a");
+	const created = await t.tool({ action: "create", prompt: "tick", every: "1h", for: "2h" });
+	expect(created.content[0].text).toContain("until");
+	vi.advanceTimersByTime(4 * HOUR);
+	expect(t.sent).toHaveLength(2);
+	await expect(t.tool({ action: "create", prompt: "x", in: "1h", for: "2h" })).rejects.toThrow("needs `every`");
+	await t.tool({ action: "create", prompt: "open ended", every: "1h", for: "" });
+	expect(readJobs("a")[0].endsAt).toBeUndefined();
 });
