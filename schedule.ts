@@ -190,18 +190,20 @@ export default function (pi, dir = DIR) {
 		name: "schedule",
 		label: "Schedule",
 		description:
-			"Send a prompt back into this same session later, with the whole conversation in context and every tool. " +
-			"It arrives as a user message exactly as written, so write what you want to be told, and it may refer to this conversation. " +
-			'action=create takes `prompt` and either `in` (once, e.g. "30m") or `every` (repeating, at least "1m"). ' +
-			"Durations: 30s, 10m, 2h, 1d, 1h30m. For a clock time, work out the delay from the current time. " +
-			"action=list shows this session's jobs; action=cancel takes `id` or `all`. " +
-			"While the session is closed nothing runs; on resume each overdue job fires once. Not available in subagents.",
+			"Schedule a prompt into this same session for later: recheck, reminder, or repeating poll. It runs with the full conversation and every tool.\n" +
+			"`create` takes `prompt` plus exactly one of `in` and `every`; `cancel` takes `id`.\n" +
+			"For a clock time, work out the delay from the current time.\n" +
+			"Interactive sessions only. A closed session fires nothing; on resume each overdue job fires once.",
 		parameters: Type.Object({
 			action: Type.Enum(["create", "list", "cancel"] as const),
-			prompt: Type.Optional(Type.String({ description: "Prompt to send (create)" })),
-			in: Type.Optional(Type.String({ description: 'Fire once after this delay, e.g. "30m" (create)' })),
-			every: Type.Optional(Type.String({ description: 'Fire repeatedly at this interval, e.g. "2h" (create)' })),
-			id: Type.Optional(Type.String({ description: 'Job id or "all" (cancel)' })),
+			prompt: Type.Optional(
+				Type.String({
+					description: "Sent verbatim as a user message: the instruction your later self needs. May refer to this conversation.",
+				}),
+			),
+			in: Type.Optional(Type.String({ description: "Fire once after this delay: 30s, 10m, 2h, 1d or 1h30m" })),
+			every: Type.Optional(Type.String({ description: "Repeat at this interval, at least 1m, in the same format as `in`" })),
+			id: Type.Optional(Type.String({ description: 'Job id, or "all"' })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, c) {
 			// A subagent or print session ends with its task, so a job created there would never fire.

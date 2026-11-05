@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixes
+
+- Agents now see when to reach for the `schedule` tool. omp lists a tool by its first description line, cut at 200 bytes, and that line used to say nothing about rechecks, reminders or polls.
+
 ## 0.1.0 (2026-11-05)
 
 ### Features
