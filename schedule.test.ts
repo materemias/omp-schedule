@@ -2,13 +2,13 @@ import { afterAll, afterEach, beforeEach, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import extension from "./schedule.ts";
+import extension, { RESUME_GRACE_MS } from "./schedule.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-schedule-test-"));
 const dir = path.join(root, "schedule");
 
 const HOUR = 3_600_000;
-const ARM_MS = 2; // activation defers to the next tick, and arming an overdue job to the one after
+const ARM_MS = RESUME_GRACE_MS + 2; // the grace, then a tick for each deferred arm of an overdue job
 const fakeType = {
 	Object: (shape: unknown) => shape,
 	Enum: (values: unknown) => values,
@@ -22,6 +22,7 @@ type Harness = {
 	sent: [string, string][];
 	notes: [string, string][];
 	status: (string | undefined)[];
+	errors: unknown[];
 	command(args: string): Promise<unknown>;
 	tool(params: Record<string, string>): Promise<ToolResult>;
 	switchTo(next: string): void;
@@ -30,11 +31,12 @@ type Harness = {
 
 const live: Harness[] = [];
 
-function start(session: string, opts: { idle?: boolean; hasUI?: boolean } = {}): Harness {
+function start(session: string, opts: { idle?: boolean; hasUI?: boolean; settle?: boolean } = {}): Harness {
 	const handlers: Record<string, Handler> = {};
 	const sent: Harness["sent"] = [];
 	const notes: Harness["notes"] = [];
 	const status: Harness["status"] = [];
+	const errors: Harness["errors"] = [];
 	let execute: Handler | undefined;
 	let idle = opts.idle ?? true;
 	let current = session;
@@ -46,6 +48,16 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean } = {}):
 			notify: (message: string, type: string) => notes.push([type, message]),
 			setStatus: (_key: string, value?: string) => status.push(value),
 		},
+		// omp's managed timers route a throwing callback to its error channel.
+		setTimeout: (callback: () => void, ms: number) =>
+			setTimeout(() => {
+				try {
+					callback();
+				} catch (err) {
+					errors.push(err);
+				}
+			}, ms),
+		clearTimer: (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer),
 	};
 	extension({
 		on: (event: string, handler: Handler) => {
@@ -67,6 +79,7 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean } = {}):
 		sent,
 		notes,
 		status,
+		errors,
 		command: async (args) => handlers.command(args, ctx),
 		tool: async (params) => (await execute?.("id", params, undefined, undefined, ctx)) as ToolResult,
 		switchTo: (next) => {
@@ -77,7 +90,7 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean } = {}):
 		shutdown: () => handlers.session_shutdown(),
 	};
 	handlers.session_start({}, ctx);
-	vi.advanceTimersByTime(ARM_MS);
+	if (opts.settle !== false) vi.advanceTimersByTime(ARM_MS);
 	live.push(harness);
 	return harness;
 }
@@ -152,9 +165,59 @@ test("an overdue recurring job fires once and continues from now", () => {
 	writeJobs("a", [{ id: 1, prompt: "tick", everyMs: HOUR, dueAt: Date.now() - 5 * HOUR }]);
 	const t = start("a");
 	expect(t.sent).toEqual([["tick", "prompt"]]);
-	expect(readJobs("a")[0].dueAt).toBe(Date.now() + HOUR);
+	expect(readJobs("a")[0].dueAt).toBeGreaterThan(Date.now() + HOUR - ARM_MS);
 	vi.advanceTimersByTime(HOUR);
 	expect(t.sent).toHaveLength(2);
+});
+
+test("an overdue job waits out the resume grace, so its prompt lands in the restored transcript", () => {
+	writeJobs("a", [{ id: 1, prompt: "late", dueAt: Date.now() - HOUR }]);
+	const t = start("a", { settle: false });
+	vi.advanceTimersByTime(RESUME_GRACE_MS - 1);
+	expect(t.sent).toEqual([]);
+	vi.advanceTimersByTime(3);
+	expect(t.sent).toEqual([["late", "prompt"]]);
+});
+
+test("a session without UI leaves overdue jobs for the interactive session", () => {
+	writeJobs("a", [{ id: 1, prompt: "keep me", dueAt: Date.now() - HOUR }]);
+	const t = start("a", { hasUI: false });
+	vi.advanceTimersByTime(HOUR);
+	expect(t.sent).toEqual([]);
+	expect(readJobs("a")).toHaveLength(1);
+});
+
+test("a malformed job file fires only its valid jobs and never throws in the timer", () => {
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(jobFile("object"), "{}");
+	const object = start("object");
+	expect(object.errors).toEqual([]);
+
+	const past = Date.now() - HOUR;
+	writeJobs("mixed", [{ id: 1, prompt: "no due time" }, { id: 2, dueAt: past }, { id: 3, prompt: "valid", dueAt: past }]);
+	const mixed = start("mixed");
+	expect(mixed.sent).toEqual([["valid", "prompt"]]);
+	expect(mixed.errors).toEqual([]);
+});
+
+test("a failed save reaches the error channel and later jobs still fire", async () => {
+	const t = start("a");
+	await t.command("1s first");
+	await t.command("2s second");
+	fs.rmSync(dir, { recursive: true });
+	fs.writeFileSync(dir, "a file where the directory should be");
+	vi.advanceTimersByTime(2000);
+	expect(t.sent.map(([prompt]) => prompt)).toEqual(["first", "second"]);
+	expect(t.errors).not.toEqual([]);
+});
+
+test("a job that can't be saved is reported and not kept", async () => {
+	const t = start("a");
+	fs.writeFileSync(dir, "a file where the directory should be");
+	await t.command("1s lost");
+	expect(t.notes.at(-1)?.[0]).toBe("error");
+	vi.advanceTimersByTime(2000);
+	expect(t.sent).toEqual([]);
 });
 
 test("a job further away than a setTimeout can wait fires on time, not early", async () => {
@@ -170,11 +233,24 @@ test("combined durations add up and a bad spec creates nothing", async () => {
 	const t = start("a");
 	await t.command("1h30m soon");
 	expect(readJobs("a")[0].dueAt).toBe(Date.now() + 1.5 * HOUR);
-	for (const bad of ["10 no unit", "5x bad unit", "0s zero", "every 30s too fast", "30m"]) {
+	for (const bad of ["10 no unit", "5x bad unit", "0s zero", "every 30s too fast", "30m", "366d too far", `${"9".repeat(309)}s overflow`]) {
 		await t.command(bad);
 		expect(t.notes.at(-1)?.[0]).toBe("error");
 	}
+	for (const incomplete of ["every 2h", "cancel 1 2"]) {
+		await t.command(incomplete);
+		expect(t.notes.at(-1)?.[1]).toStartWith("Usage:");
+	}
 	expect(readJobs("a")).toHaveLength(1);
+});
+
+test("a cancelled job's id is not reused while the session runs", async () => {
+	const t = start("a");
+	await t.command("1h one");
+	await t.command("2h two");
+	await t.command("cancel 2");
+	await t.command("3h three");
+	expect(readJobs("a").map((j: { id: number }) => j.id)).toEqual([1, 3]);
 });
 
 test("cancel removes one job by id, or all of them", async () => {

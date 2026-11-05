@@ -1,11 +1,12 @@
 // omp-schedule: send a prompt into this same session after a delay or on a fixed interval, from the
 // /schedule command or the agent's `schedule` tool.
 //
-// A job belongs to the session that created it and fires only there, exactly as if the prompt had
-// been typed: no wrapper, same context, every tool. A busy agent gets it as a follow-up.
+// A job belongs to the session that created it and fires only there, as a plain user message: no
+// wrapper, same context, every tool. A busy agent gets it as a follow-up.
 // Jobs live in ~/.omp/agent/schedule/<sessionId>.json, so they survive /restart and resume.
 // A closed session fires nothing; on resume each overdue job fires once and recurring jobs continue
 // from that moment. Forks, branches and handoffs get a new session ID and no jobs.
+// Sessions without a UI, such as print mode and subagents, neither schedule nor fire.
 // @ts-nocheck
 
 import * as fs from "node:fs";
@@ -14,8 +15,13 @@ import * as path from "node:path";
 
 const DIR = path.join(os.homedir(), ".omp", "agent", "schedule");
 const MAX_TIMER_MS = 2 ** 31 - 1; // setTimeout fires immediately above ~24.8 days
-const MIN_EVERY_MS = 60_000;
 const UNIT_MS = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1000 };
+const MIN_EVERY_MS = 60_000;
+const MAX_DURATION_MS = 365 * 86_400_000; // formatTime shows no year
+// OMP restores the transcript and draws the chat only after the session hooks return, with startup
+// I/O and other extensions' async handlers in between, and no event marks the end. A prompt sent
+// before that would be lost, so overdue jobs wait this long after a session becomes active.
+export const RESUME_GRACE_MS = 2000;
 const USAGE = "Usage: /schedule 30m <prompt> | /schedule every 2h <prompt> | /schedule cancel <id|all>";
 
 type Job = { id: number; prompt: string; everyMs?: number; dueAt: number };
@@ -24,7 +30,7 @@ function parseDuration(text: string): number | undefined {
 	if (!/^(\d+[dhms])+$/.test(text)) return undefined;
 	let ms = 0;
 	for (const [, n, unit] of text.matchAll(/(\d+)([dhms])/g)) ms += Number(n) * UNIT_MS[unit];
-	return ms || undefined;
+	return ms > 0 && ms <= MAX_DURATION_MS ? ms : undefined;
 }
 
 function formatDuration(ms: number): string {
@@ -44,9 +50,19 @@ function formatTime(ts: number): string {
 	return d.toDateString() === new Date().toDateString() ? hm : `${d.getMonth() + 1}.${d.getDate()}. ${hm}`;
 }
 
+function isJob(j): j is Job {
+	return (
+		Number.isInteger(j?.id) &&
+		typeof j.prompt === "string" &&
+		Number.isFinite(j.dueAt) &&
+		(j.everyMs === undefined || j.everyMs > 0)
+	);
+}
+
 function load(file: string): Job[] {
 	try {
-		return JSON.parse(fs.readFileSync(file, "utf8"));
+		const data = JSON.parse(fs.readFileSync(file, "utf8"));
+		return Array.isArray(data) ? data.filter(isJob) : [];
 	} catch {
 		return [];
 	}
@@ -67,68 +83,77 @@ export default function (pi, dir = DIR) {
 	let sessionId: string | undefined; // session whose jobs are loaded
 	let file: string; // that session's job file
 	let jobs: Job[] = [];
+	let lastId = 0; // ids stay unique within a run, so a stale listing can't cancel a newer job
 	let timer;
 
-	function setStatus() {
-		if (!ctx?.hasUI) return;
-		const next = jobs.reduce((a, j) => (a && a.dueAt <= j.dueAt ? a : j), undefined);
-		const more = jobs.length > 1 ? ` +${jobs.length - 1}` : "";
-		ctx.ui.setStatus("schedule", next ? `⏰ ${formatTime(next.dueAt)}${more}` : undefined);
+	function disarm() {
+		if (timer) ctx?.clearTimer(timer);
+		timer = undefined;
 	}
 
 	function arm() {
-		clearTimeout(timer);
-		timer = undefined;
-		setStatus();
-		if (jobs.length === 0) return;
-		const next = Math.min(...jobs.map((j) => j.dueAt));
-		timer = setTimeout(fireDue, Math.min(Math.max(next - Date.now(), 0), MAX_TIMER_MS));
-		timer.unref?.();
+		disarm();
+		const next = jobs.reduce((a, j) => (a && a.dueAt <= j.dueAt ? a : j), undefined);
+		const more = jobs.length > 1 ? ` +${jobs.length - 1}` : "";
+		ctx.ui.setStatus("schedule", next ? `⏰ ${formatTime(next.dueAt)}${more}` : undefined);
+		if (next) timer = ctx.setTimeout(fireDue, Math.min(Math.max(next.dueAt - Date.now(), 0), MAX_TIMER_MS));
 	}
 
 	function fireDue() {
 		timer = undefined;
 		if (!ctx || ctx.sessionManager.getSessionId() !== sessionId) return;
 		const now = Date.now();
+		const due = jobs.filter((j) => j.dueAt <= now);
+		if (due.length === 0) {
+			arm(); // the wait was capped at MAX_TIMER_MS
+			return;
+		}
 		// An idle agent starts a turn on the first prompt; later ones queue behind it.
 		let busy = !ctx.isIdle();
-		for (const job of jobs.filter((j) => j.dueAt <= now)) {
+		for (const job of due) {
 			pi.sendUserMessage(job.prompt, busy ? { deliverAs: "followUp" } : undefined);
 			busy = true;
 			if (job.everyMs) job.dueAt = now + job.everyMs;
 			else jobs = jobs.filter((j) => j !== job);
 		}
-		save(file, jobs);
-		arm();
+		// A failed save reaches omp's extension error channel; the other jobs must still fire.
+		try {
+			save(file, jobs);
+		} finally {
+			arm();
+		}
 	}
 
 	function activate(c) {
-		clearTimeout(timer);
+		if (!c.hasUI) return;
+		disarm();
 		ctx = c;
 		sessionId = c.sessionManager.getSessionId();
 		file = path.join(dir, `${sessionId}.json`);
 		jobs = load(file);
-		// On resume or switch OMP replaces the transcript after the hook returns; a prompt sent
-		// before that would be lost, so overdue jobs fire on the next tick.
-		timer = setTimeout(arm, 0);
+		lastId = Math.max(0, ...jobs.map((j) => j.id));
+		timer = ctx.setTimeout(arm, RESUME_GRACE_MS);
 	}
 
 	function ensureActive(c) {
+		// A print or subagent session ends with its task, so a job created there would never fire.
+		if (!c.hasUI) throw new Error("schedule needs an interactive session.");
 		if (c.sessionManager.getSessionId() !== sessionId) activate(c);
 	}
 
 	function addJob(prompt: string, duration: string, repeat: boolean): string {
 		const ms = parseDuration(duration);
-		if (!ms) throw new Error(`Bad duration "${duration}": use 30s, 10m, 2h, 1d or 1h30m.`);
+		if (!ms) throw new Error(`Bad duration "${duration}": use 30s, 10m, 2h, 1d or 1h30m, up to 365d.`);
 		if (repeat && ms < MIN_EVERY_MS) throw new Error("Interval must be at least 1m.");
 		const job: Job = {
-			id: Math.max(0, ...jobs.map((j) => j.id)) + 1,
+			id: lastId + 1,
 			prompt,
 			everyMs: repeat ? ms : undefined,
 			dueAt: Date.now() + ms,
 		};
+		save(file, [...jobs, job]);
+		lastId = job.id;
 		jobs.push(job);
-		save(file, jobs);
 		arm();
 		return `#${job.id} at ${formatTime(job.dueAt)}${repeat ? `, then every ${formatDuration(ms)}` : ""}`;
 	}
@@ -137,8 +162,8 @@ export default function (pi, dir = DIR) {
 		const kept = target === "all" ? [] : jobs.filter((j) => String(j.id) !== target.replace(/^#/, ""));
 		const cancelled = jobs.length - kept.length;
 		if (cancelled === 0) throw new Error(`No job ${target}.`);
+		save(file, kept);
 		jobs = kept;
-		save(file, jobs);
 		arm();
 		return `Cancelled ${cancelled} job(s).`;
 	}
@@ -157,16 +182,16 @@ export default function (pi, dir = DIR) {
 	pi.on("session_switch", (_event, c) => activate(c));
 	pi.on("session_branch", (_event, c) => activate(c));
 	pi.on("session_shutdown", () => {
-		clearTimeout(timer);
+		disarm();
 		ctx = undefined;
 	});
 
 	pi.registerCommand("schedule", {
 		description: "Send a prompt to this session later: /schedule 30m <prompt> | every 2h <prompt> | cancel <id|all>",
 		handler: async (args: string, c) => {
-			ensureActive(c);
-			const text = args.trim();
 			try {
+				ensureActive(c);
+				const text = args.trim();
 				if (text === "" || text === "list") {
 					c.ui.notify(listJobs() ?? `No scheduled jobs in this session.\n${USAGE}`, "info");
 					return;
@@ -177,7 +202,7 @@ export default function (pi, dir = DIR) {
 					return;
 				}
 				const job = text.match(/^(every\s+)?(\S+)\s+(\S[\s\S]*)$/);
-				if (!job) throw new Error(USAGE);
+				if (!job || job[2] === "every" || job[2] === "cancel") throw new Error(USAGE);
 				c.ui.notify(addJob(job[3].trim(), job[2], Boolean(job[1])), "info");
 			} catch (err) {
 				c.ui.notify(err.message, "error");
@@ -206,8 +231,6 @@ export default function (pi, dir = DIR) {
 			id: Type.Optional(Type.String({ description: 'Job id, or "all"' })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, c) {
-			// A subagent or print session ends with its task, so a job created there would never fire.
-			if (!c.hasUI) throw new Error("schedule needs an interactive session: this one ends with its task.");
 			ensureActive(c);
 			const text = runTool(params);
 			return { content: [{ type: "text", text }], details: {} };

@@ -32,18 +32,21 @@ The `schedule` tool has three actions:
 - `list` shows this session's jobs.
 - `cancel` takes `id`, a job id or `all`.
 
-Ask for it in plain words, such as "check the CI run again in 20 minutes". The prompt arrives as a user message, so it can refer to the conversation. A subagent can't schedule, because its session ends with its task and the job would never fire.
+Ask for it in plain words, such as "check the CI run again in 20 minutes". The prompt arrives as a user message, so it can refer to the conversation. Only an interactive session can schedule: a subagent or print session ends with its task, so its job would never fire.
 
 ## When jobs fire
 
-An idle agent starts a turn on the prompt right away. A busy agent gets it as a follow-up after the current turn. If several jobs are due together, the first one starts the turn and the rest queue behind it.
+An idle agent starts a turn on the prompt right away. A busy agent gets it as a follow-up after the current turn. If several jobs are due together, the first one starts the turn and the rest queue behind it. After a resume or a session switch, overdue jobs wait 2 seconds so omp can restore the transcript first.
 
 Jobs are stored in `~/.omp/agent/schedule/<sessionId>.json`, so they survive `/restart` and resume. Only the session with that ID reads the file.
 
 ## Limits
 
-- Nothing runs while the session is closed, because there is no daemon. On resume each overdue job fires once, and a recurring job counts its next run from that moment.
+- Nothing runs while the session is closed, because there is no daemon. On resume each overdue job fires once, and a recurring job counts its next run from that moment. Resuming in print mode (`omp -p`) leaves the jobs waiting for an interactive session.
 - Forks, branches and handoffs get a new session ID and take no jobs with them. The jobs stay with the original session.
 - There is no clock-time schedule. For "at 20:00", give the delay. The agent works it out from the current time.
+- A slash command in a prompt stays plain text. omp doesn't run it.
+- If two omp processes have the same session open, each one fires its jobs, so a prompt can arrive twice.
+- A delay or interval can be at most `365d`.
 
 MIT.
