@@ -24,6 +24,7 @@ type Harness = {
 	status: (string | undefined)[];
 	errors: unknown[];
 	command(args: string): Promise<unknown>;
+	complete(args: string): { value: string }[] | null;
 	tool(params: Record<string, string>): Promise<ToolResult>;
 	switchTo(next: string): void;
 	shutdown(): void;
@@ -63,8 +64,9 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean; settle?
 		on: (event: string, handler: Handler) => {
 			handlers[event] = handler;
 		},
-		registerCommand: (_name: string, command: { handler: Handler }) => {
+		registerCommand: (_name: string, command: { handler: Handler; getArgumentCompletions: Handler }) => {
 			handlers.command = command.handler;
+			handlers.complete = command.getArgumentCompletions;
 		},
 		registerTool: (definition: { execute: Handler }) => {
 			execute = definition.execute;
@@ -81,6 +83,7 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean; settle?
 		status,
 		errors,
 		command: async (args) => handlers.command(args, ctx),
+		complete: (args) => handlers.complete(args) as { value: string }[] | null,
 		tool: async (params) => (await execute?.("id", params, undefined, undefined, ctx)) as ToolResult,
 		switchTo: (next) => {
 			current = next;
@@ -302,4 +305,20 @@ test("the tool refuses a session without UI, whose jobs would never fire", async
 	const t = start("subagent", { hasUI: false });
 	await expect(t.tool({ action: "create", prompt: "x", in: "1h" })).rejects.toThrow("interactive session");
 	expect(fs.existsSync(jobFile("subagent"))).toBe(false);
+});
+
+test("completions offer units, valid intervals, the session's jobs, and stop once the prompt starts", async () => {
+	const t = start("a");
+	const values = (args: string) => t.complete(args)?.map((item) => item.value);
+	expect(values("2")).toEqual(["2m ", "2h ", "2d ", "2s "]);
+	expect(values("1h3")).toEqual(["1h3m ", "1h3d ", "1h3s "]);
+	expect(values("every 30")).toEqual(["every 30m ", "every 30h ", "every 30d "]);
+	expect(values("400d")).toEqual([]);
+	expect(values("c")).toEqual([]);
+	await t.command("1h one");
+	await t.command("2h two");
+	expect(values("c")).toEqual(["cancel "]);
+	expect(values("cancel ")).toEqual(["cancel 1", "cancel 2", "cancel all"]);
+	expect(values("cancel #2")).toEqual(["cancel 2"]);
+	expect(t.complete("30m check the deploy")).toBeNull();
 });

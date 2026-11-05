@@ -168,14 +168,49 @@ export default function (pi, dir = DIR) {
 		return `Cancelled ${cancelled} job(s).`;
 	}
 
+	function describeJob(j: Job): string {
+		const repeat = j.everyMs ? `every ${formatDuration(j.everyMs)}` : "once";
+		return `${formatTime(j.dueAt)}  ${repeat}  ${j.prompt.replace(/\s+/g, " ").slice(0, 80)}`;
+	}
+
 	function listJobs(): string | undefined {
 		if (jobs.length === 0) return undefined;
-		return jobs
-			.map((j) => {
-				const repeat = j.everyMs ? `every ${formatDuration(j.everyMs)}` : "once";
-				return `#${j.id}  ${formatTime(j.dueAt)}  ${repeat}  ${j.prompt.replace(/\s+/g, " ").slice(0, 80)}`;
-			})
-			.join("\n");
+		return jobs.map((j) => `#${j.id}  ${describeJob(j)}`).join("\n");
+	}
+
+	// Durations for the word being typed: units for bare digits, the fire time once one is complete.
+	function durationItems(head: string, word: string, repeat: boolean) {
+		const units = ["m", "h", "d", "s"].filter((u) => !word.includes(u));
+		const specs = word === "" ? ["10m", "1h", "1d"] : /^(\d+[dhms])*\d+$/.test(word) ? units.map((u) => word + u) : [word];
+		return specs.flatMap((spec) => {
+			const ms = parseDuration(spec);
+			if (!ms || (repeat && ms < MIN_EVERY_MS)) return [];
+			const when = repeat ? `every ${formatDuration(ms)}, first at` : "once at";
+			return [{ value: `${head}${spec} `, label: `${spec} <prompt>`, description: `${when} ${formatTime(Date.now() + ms)}` }];
+		});
+	}
+
+	// The editor replaces everything after "/schedule " with the picked value.
+	function completions(args: string) {
+		const text = args.trimStart();
+		const every = text.match(/^every\s+(\S*)$/);
+		if (every) return durationItems("every ", every[1], true);
+		const cancel = text.match(/^cancel\s+#?(\S*)$/);
+		if (cancel) {
+			const ids = jobs.filter((j) => String(j.id).startsWith(cancel[1]));
+			const items = ids.map((j) => ({ value: `cancel ${j.id}`, label: `#${j.id}`, description: describeJob(j) }));
+			if (jobs.length > 1 && "all".startsWith(cancel[1])) {
+				items.push({ value: "cancel all", label: "all", description: `all ${jobs.length} jobs` });
+			}
+			return items;
+		}
+		if (/\s/.test(text)) return null; // the prompt has started
+		const actions = [
+			{ value: "every ", label: "every <interval> <prompt>", description: "repeat the prompt, at least 1m apart" },
+			{ value: "list", label: "list", description: `this session's jobs (${jobs.length})` },
+		];
+		if (jobs.length > 0) actions.push({ value: "cancel ", label: "cancel <id|all>", description: "remove a job" });
+		return [...durationItems("", text, false), ...actions.filter((a) => a.value.startsWith(text))];
 	}
 
 	pi.on("session_start", (_event, c) => activate(c));
@@ -188,6 +223,7 @@ export default function (pi, dir = DIR) {
 
 	pi.registerCommand("schedule", {
 		description: "Send a prompt to this session later: /schedule 30m <prompt> | every 2h <prompt> | cancel <id|all>",
+		getArgumentCompletions: completions,
 		handler: async (args: string, c) => {
 			try {
 				ensureActive(c);
