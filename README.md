@@ -19,7 +19,7 @@ Restart omp. To update, run `omp plugin upgrade omp-schedule@omp-schedule`.
 /schedule 30m <prompt>         once, 30 minutes from now
 /schedule every 2h <prompt>    every 2 hours, first run in 2 hours
 /schedule every 10m for 2h <prompt>    every 10 minutes for 2 hours, then stop
-/schedule                      list this session's jobs
+/schedule                      list this session's jobs, one row each, and pick one to cancel
 /schedule cancel <id|all>
 ```
 

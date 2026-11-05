@@ -23,6 +23,7 @@ type Harness = {
 	notes: [string, string][];
 	status: (string | undefined)[];
 	errors: unknown[];
+	dialog: { rows: string[]; details: (string | undefined)[]; pick: (rows: string[]) => string | undefined; confirm: boolean };
 	command(args: string): Promise<unknown>;
 	complete(args: string): { value: string }[] | null;
 	tool(params: Record<string, string>): Promise<ToolResult>;
@@ -38,6 +39,7 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean; settle?
 	const notes: Harness["notes"] = [];
 	const status: Harness["status"] = [];
 	const errors: Harness["errors"] = [];
+	const dialog: Harness["dialog"] = { rows: [], details: [], pick: () => undefined, confirm: true };
 	let execute: Handler | undefined;
 	let idle = opts.idle ?? true;
 	let current = session;
@@ -47,6 +49,12 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean; settle?
 		sessionManager: { getSessionId: () => current },
 		ui: {
 			notify: (message: string, type: string) => notes.push([type, message]),
+			select: async (_title: string, rows: (string | { label: string; description: string })[]) => {
+				dialog.rows = rows.map((row) => (typeof row === "string" ? row : row.label));
+				dialog.details = rows.map((row) => (typeof row === "string" ? undefined : row.description));
+				return dialog.pick(dialog.rows);
+			},
+			confirm: async () => dialog.confirm,
 			setStatus: (_key: string, value?: string) => status.push(value),
 		},
 		// omp's managed timers route a throwing callback to its error channel.
@@ -82,6 +90,7 @@ function start(session: string, opts: { idle?: boolean; hasUI?: boolean; settle?
 		notes,
 		status,
 		errors,
+		dialog,
 		command: async (args) => handlers.command(args, ctx),
 		complete: (args) => handlers.complete(args) as { value: string }[] | null,
 		tool: async (params) => (await execute?.("id", params, undefined, undefined, ctx)) as ToolResult,
@@ -277,7 +286,8 @@ test("jobs survive a restart of the session's process", async () => {
 	first.shutdown();
 	const second = start("a");
 	await second.command("");
-	expect(second.notes.at(-1)?.[1]).toContain("every 1h  keep going");
+	expect(second.dialog.rows[0]).toBe("#1  keep going");
+	expect(second.dialog.details[0]).toContain("every 1h");
 	expect(second.status.at(-1)).toContain("⏰");
 });
 
@@ -377,7 +387,7 @@ test("a window survives a restart and shows in the listing", async () => {
 	first.shutdown();
 	const second = start("a");
 	await second.command("");
-	expect(second.notes.at(-1)?.[1]).toContain("until");
+	expect(second.dialog.details[0]).toContain("until");
 	expect(readJobs("a")[0].endsAt).toBeGreaterThan(Date.now());
 });
 
@@ -406,4 +416,41 @@ test("the tool takes a window with `every` and refuses it without", async () => 
 	await expect(t.tool({ action: "create", prompt: "x", in: "1h", for: "2h" })).rejects.toThrow("needs `every`");
 	await t.tool({ action: "create", prompt: "open ended", every: "1h", for: "" });
 	expect(readJobs("a")[0].endsAt).toBeUndefined();
+});
+
+test("the list shows a row per job and cancels only a confirmed pick", async () => {
+	const t = start("a");
+	await t.command("1h one");
+	await t.command("every 2h two");
+	await t.command("");
+	expect(t.dialog.rows).toHaveLength(3);
+	expect(t.dialog.rows[1]).toBe("#2  two");
+	expect(t.dialog.details[1]).toContain("every 2h");
+	expect(readJobs("a")).toHaveLength(2);
+
+	t.dialog.pick = (rows) => rows[1];
+	t.dialog.confirm = false;
+	await t.command("list");
+	expect(readJobs("a")).toHaveLength(2);
+
+	t.dialog.confirm = true;
+	await t.command("");
+	expect(readJobs("a").map((j: { prompt: string }) => j.prompt)).toEqual(["one"]);
+
+	await t.command("3h three");
+	t.dialog.pick = (rows) => rows.at(-1);
+	await t.command("");
+	expect(fs.existsSync(jobFile("a"))).toBe(false);
+});
+
+test("a job that fired while the list was open is reported as gone", async () => {
+	const t = start("a");
+	await t.command("1s one");
+	t.dialog.pick = (rows) => {
+		vi.advanceTimersByTime(1000);
+		return rows[0];
+	};
+	await t.command("");
+	expect(t.sent).toEqual([["one", "prompt"]]);
+	expect(t.notes.at(-1)).toEqual(["error", "No job 1."]);
 });

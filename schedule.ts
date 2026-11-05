@@ -210,6 +210,24 @@ export default function (pi, dir = DIR) {
 		return jobs.map((j) => `#${j.id}  ${describeJob(j)}`).join("\n");
 	}
 
+	// A notification would flatten the rows onto one line, so the list is a dialog that can also cancel.
+	async function showJobs(c) {
+		if (jobs.length === 0) {
+			c.ui.notify(`No scheduled jobs in this session.\n${USAGE}`, "info");
+			return;
+		}
+		const shown = [...jobs];
+		const rows = shown.map((j) => ({
+			label: `#${j.id}  ${shortPrompt(j)}`,
+			description: `next ${formatTime(j.dueAt)} · ${describeRepeat(j)}`,
+		}));
+		const cancelAll = "Cancel all";
+		const picked = await c.ui.select("Scheduled jobs (Enter cancels, Esc closes)", shown.length > 1 ? [...rows, cancelAll] : rows);
+		if (picked === undefined) return;
+		if (!(await c.ui.confirm("Cancel?", picked))) return;
+		c.ui.notify(cancelJobs(picked === cancelAll ? "all" : String(shown[rows.findIndex((r) => r.label === picked)].id)), "info");
+	}
+
 	// Durations for the word being typed: units for bare digits, the outcome once one is complete.
 	function durationItems(head: string, word: string, minMs: number, describe: (ms: number) => string) {
 		const units = ["m", "h", "d", "s"].filter((u) => !word.includes(u));
@@ -268,7 +286,7 @@ export default function (pi, dir = DIR) {
 				ensureActive(c);
 				const text = args.trim();
 				if (text === "" || text === "list") {
-					c.ui.notify(listJobs() ?? `No scheduled jobs in this session.\n${USAGE}`, "info");
+					await showJobs(c);
 					return;
 				}
 				const cancel = text.match(/^cancel\s+(\S+)$/);
