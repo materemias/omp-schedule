@@ -102,6 +102,7 @@ export default function (pi, dir = DIR) {
 	let file: string; // that session's job file
 	let jobs: Job[] = [];
 	let lastId = 0; // ids stay unique within a run, so a stale listing can't cancel a newer job
+	let activatedAt = 0; // a window that closed before this moment closed with the session away
 	let timer;
 
 	function disarm() {
@@ -129,7 +130,7 @@ export default function (pi, dir = DIR) {
 		// An idle agent starts a turn on the first prompt; later ones queue behind it.
 		let busy = !ctx.isIdle();
 		for (const job of due) {
-			if (job.endsAt === undefined || now - job.endsAt <= MAX_LATE_MS) {
+			if (job.endsAt === undefined || (job.endsAt >= activatedAt && now - job.endsAt <= MAX_LATE_MS)) {
 				pi.sendUserMessage(job.prompt, busy ? { deliverAs: "followUp" } : undefined);
 				busy = true;
 			}
@@ -151,6 +152,7 @@ export default function (pi, dir = DIR) {
 		ctx = c;
 		sessionId = c.sessionManager.getSessionId();
 		file = path.join(dir, `${sessionId}.json`);
+		activatedAt = Date.now();
 		jobs = load(file);
 		lastId = Math.max(0, ...jobs.map((j) => j.id));
 		timer = ctx.setTimeout(arm, RESUME_GRACE_MS);

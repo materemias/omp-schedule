@@ -381,6 +381,14 @@ test("a window that closed while the session was closed fires nothing and clears
 	expect(fs.existsSync(jobFile("a"))).toBe(false);
 });
 
+test("a window that closed a moment before resume fires nothing", () => {
+	const now = Date.now();
+	writeJobs("a", [{ id: 1, prompt: "too late", everyMs: HOUR, dueAt: now - 1000, endsAt: now - 1000 }]);
+	const t = start("a");
+	expect(t.sent).toEqual([]);
+	expect(fs.existsSync(jobFile("a"))).toBe(false);
+});
+
 test("a window survives a restart and shows in the listing", async () => {
 	const first = start("a");
 	await first.command("every 1h for 1d tick");
