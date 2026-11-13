@@ -9,6 +9,10 @@
 - A row above the composer shows the next job, its time and its repeat from the moment you schedule it. It replaces the clock in the footer.
 - `/schedule` opens a dialog with one row per job. Picking a row cancels that job after a confirmation.
 
+### Fixes
+
+- The agent no longer reaches for `schedule` to wait for a PR comment, CI or a reply: the tool says it only runs on a clock and points to an event-watching tool when the session has one.
+
 ## 0.1.0 (2026-11-05)
 
 ### Features

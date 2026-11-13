@@ -317,7 +317,8 @@ export default function (pi, dir = DIR) {
 		name: "schedule",
 		label: "Schedule",
 		description:
-			"Schedule a prompt into this same session for later: recheck, reminder, or repeating poll. It runs with the full conversation and every tool.\n" +
+			"Re-prompt this same session on a clock: once after a delay, or repeating. Each run is a full agent turn with the conversation and every tool.\n" +
+			"It can't watch for an event. To wait until something happens (a PR review or comment, CI, a release, a reply) and tell the user, use a tool that watches events if the session has one. Use schedule when the later step needs your judgment, e.g. reading the logs every 2h.\n" +
 			"`create` takes `prompt` plus exactly one of `in` and `every`; `cancel` takes `id`.\n" +
 			"For a clock time, work out the delay from the current time.\n" +
 			"Interactive sessions only. A closed session fires nothing; on resume each overdue job fires once.",
