@@ -8,7 +8,7 @@
 			"name": "omp-schedule",
 			"source": "./",
 			"description": "Send a prompt back into the same omp session after a delay or on an interval, from /schedule or the agent's own tool",
-			"version": "0.1.0"
+			"version": "0.2.0"
 		}
 	]
 }

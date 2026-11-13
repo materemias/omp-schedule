@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 (2026-11-13)
+
 ### Features
 
 - `/schedule every 10m for 2h <prompt>` ends a repeating job after a time window. The agent's `schedule` tool takes the same limit as `for`.
